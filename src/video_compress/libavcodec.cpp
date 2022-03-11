@@ -120,6 +120,8 @@ constexpr const char *FALLBACK_NVENC_PRESET = "llhq";
 
 static constexpr const char *DEFAULT_QSV_PRESET = "medium";
 
+constexpr int NAL_UNIT_SIZE = 1200;
+
 typedef struct {
         const char *(*get_prefered_encoder)(bool is_rgb); ///< can be nullptr
         double avg_bpp;
@@ -1699,15 +1701,10 @@ ADD_TO_PARAM("lavc-h264-interlaced-dct", "* lavc-h264-interlaced-dct\n"
                  "  Use interlaced DCT for H.264\n");
 static void configure_x264_x265(AVCodecContext *codec_ctx, struct setparam_param *param)
 {
-        const char *tune;
-        if (codec_ctx->codec->id == AV_CODEC_ID_H264) {
-                tune = "zerolatency,fastdecode";
-        } else { // x265 supports only single tune parameter
-                tune = "zerolatency";
-        }
-        int ret = av_opt_set(codec_ctx->priv_data, "tune", tune, 0);
-        if (ret != 0) {
-                log_msg(LOG_LEVEL_WARNING, "[lavc] Unable to set tune %s.\n", tune);
+        const char *tune = codec_ctx->codec->id == AV_CODEC_ID_H264 ? "zerolatency,fastdecode" : "zerolatency"; // x265 supports only single tune parameter
+        if (int ret = av_opt_set(codec_ctx->priv_data, "tune", tune, 0)) {
+                string error = string(MOD_NAME) + "Unable to set tune to " + tune;
+                print_libav_error(LOG_LEVEL_WARNING, error.c_str(), ret);
         }
 
         // try to keep frame sizes as even as possible
@@ -1729,6 +1726,12 @@ static void configure_x264_x265(AVCodecContext *codec_ctx, struct setparam_param
                 // this options increases variance in frame sizes quite a lot
                 if (param->interlaced) {
                         codec_ctx->flags |= AV_CODEC_FLAG_INTERLACED_DCT;
+                }
+        }
+
+        if (codec_ctx->codec->id == AV_CODEC_ID_H264) {
+                if (int ret = av_opt_set_int(codec_ctx->priv_data, "slice-max-size", NAL_UNIT_SIZE, 0)) {
+                        print_libav_error(LOG_LEVEL_WARNING, MOD_NAME "Unable to set max slice size", ret);
                 }
         }
 

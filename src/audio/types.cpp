@@ -419,7 +419,8 @@ tuple<bool, audio_frame2> audio_frame2::resample_fake([[maybe_unused]] audio_fra
         return {true, std::move(remainder)};
 #else
         UNUSED(resampler_state.resample_from);
-        UNUSED(resampler_state.resample_to);
+        UNUSED(resampler_state.resample_to_num);
+        UNUSED(resampler_state.resample_to_den);
         UNUSED(resampler_state.resample_ch_count);
         LOG(LOG_LEVEL_ERROR) << "Audio frame resampler: cannot resample, SpeexDSP was not compiled in!\n";
         return {false, audio_frame2{}};

@@ -48,25 +48,14 @@
 extern "C" {
 #endif
 
-#define RTPENC_H264_PT 96
+struct rtpenc_h264_state;
 
-struct rtpenc_h264_state {
-	bool haveSeenFirstStartCode;
-	uint8_t firstByteOfNALUnit;
-	unsigned char* startOfFrame;
-	unsigned char* to;
-	unsigned char* from;
-	unsigned maxPacketSize;
-	unsigned curNALOffset;
-	bool lastNALUnitFragment;
-	unsigned curParserIndex; // <= inputFrameSize
-	unsigned curParserIndexOffset;
-	unsigned inputFrameSize;
-	bool haveSeenEOF;
-};
+#define RTPENC_STATE_SIZE 64
 
-struct rtpenc_h264_state * rtpenc_h264_init_state(void);
+struct rtpenc_h264_state * rtpenc_h264_init_state(void *buf);
+unsigned char *rtpenc_h264_get_from_state(struct rtpenc_h264_state *rtpench264state);
 unsigned rtpenc_h264_frame_parse(struct rtpenc_h264_state *rtpench264state, uint8_t *buf_in, int size);
+bool rtpenc_h264_have_seen_eof(struct rtpenc_h264_state *rtpench264state); //EndOfFrame
 
 #ifdef __cplusplus
 }
