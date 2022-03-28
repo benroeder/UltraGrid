@@ -72,6 +72,8 @@
 #include "audio/playback/sdi.h"
 #include "audio/jack.h" 
 #include "audio/utils.h"
+#include "audio/audio_filter.h"
+#include "audio/filter_chain.hpp"
 #include "debug.h"
 #include "../export.h" // not audio/export.h
 #include "host.h"
@@ -90,6 +92,7 @@
 #include "utils/net.h"
 #include "utils/thread.h"
 #include "utils/worker.h"
+#include "utils/misc.h"
 
 using namespace std;
 using rang::fg;
@@ -102,7 +105,7 @@ enum audio_transport_device {
 };
 
 #define DEFAULT_AUDIO_RECV_BUF_SIZE (256 * 1024)
-constexpr const char *MOD_NAME = "[audio] ";
+#define MOD_NAME "[audio] "
 
 struct audio_network_parameters {
         char *addr = nullptr;
@@ -115,38 +118,26 @@ struct audio_network_parameters {
 };
 
 struct state_audio {
-        state_audio(struct module *parent) {
-                module_init_default(&mod);
-                mod.priv_data = this;
-                mod.cls = MODULE_CLASS_AUDIO;
-                module_register(&mod, parent);
-
-                module_init_default(&audio_receiver_module);
-                audio_receiver_module.cls = MODULE_CLASS_RECEIVER;
-                audio_receiver_module.priv_data = this;
-                module_register(&audio_receiver_module, &mod);
-
-                module_init_default(&audio_sender_module);
-                audio_sender_module.cls = MODULE_CLASS_SENDER;
-                audio_sender_module.priv_data = this;
-                module_register(&audio_sender_module, &mod);
-
+        state_audio(struct module *parent) :
+                mod(MODULE_CLASS_AUDIO, parent, this),
+                audio_receiver_module(MODULE_CLASS_RECEIVER, mod.get(), this),
+                audio_sender_module(MODULE_CLASS_SENDER,mod.get(), this),
+                filter_chain(audio_sender_module.get())
+        {
                 gettimeofday(&t0, NULL);
         }
         ~state_audio() {
                 delete fec_state;
-
-                module_done(&audio_receiver_module);
-                module_done(&audio_sender_module);
-                module_done(&mod);
         }
 
-        struct module mod;
+        module_raii mod;
         struct state_audio_capture *audio_capture_device = nullptr;
         struct state_audio_playback *audio_playback_device = nullptr;
 
-        struct module audio_receiver_module;
-        struct module audio_sender_module;
+        module_raii audio_receiver_module;
+        module_raii audio_sender_module;
+
+        Filter_chain filter_chain;
 
         struct audio_codec_state *audio_encoder = nullptr;
         
@@ -158,7 +149,7 @@ struct state_audio {
         enum audio_transport_device sender = NET_NATIVE;
         enum audio_transport_device receiver = NET_NATIVE;
         
-        std::chrono::steady_clock::time_point start_time;
+        time_ns_t start_time;
 
         struct timeval t0; // for statistics
         audio_frame2 captured;
@@ -242,7 +233,7 @@ struct state_audio * audio_cfg_init(struct module *parent,
                 const char *encryption,
                 int force_ip_version, const char *mcast_iface,
                 long long int bitrate, volatile int *audio_delay,
-                const std::chrono::steady_clock::time_point *start_time,
+                time_ns_t start_time,
                 int mtu, int ttl, struct exporter *exporter)
 {
         struct state_audio *s = NULL;
@@ -269,7 +260,7 @@ struct state_audio * audio_cfg_init(struct module *parent,
         }
         
         s = new state_audio(parent);
-        s->start_time = *start_time;
+        s->start_time = start_time;
 
         s->audio_channel_map = opt->channel_map;
         s->audio_scale = opt->scale;
@@ -292,6 +283,17 @@ struct state_audio * audio_cfg_init(struct module *parent,
 #endif /* HAVE_SPEEXDSP */
         } else {
                 s->echo_state = NULL;
+        }
+
+        if(opt->filter_cfg){
+                std::string_view cfg_sv = opt->filter_cfg;;
+                std::string_view item;
+                while(item = tokenize(cfg_sv, '#'), !item.empty()) {
+                        if(!s->filter_chain.emplace_new(item)) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to init audio filter\n");
+                                goto error;
+                        }
+                }
         }
 
         if(encryption) {
@@ -333,7 +335,7 @@ struct state_audio * audio_cfg_init(struct module *parent,
                 if(ret > 0) {
                         goto error;
                 }
-                s->tx_session = tx_init(&s->audio_sender_module, mtu, TX_MEDIA_AUDIO, opt->fec_cfg, encryption, bitrate);
+                s->tx_session = tx_init(s->audio_sender_module.get(), mtu, TX_MEDIA_AUDIO, opt->fec_cfg, encryption, bitrate);
                 if(!s->tx_session) {
                         fprintf(stderr, "Unable to initialize audio transmit.\n");
                         goto error;
@@ -480,11 +482,11 @@ void audio_done(struct state_audio *s)
         audio_capture_done(s->audio_capture_device);
         // process remaining messages
         struct message *msg;
-        while ((msg = check_message(&s->audio_receiver_module))) {
+        while ((msg = check_message(s->audio_receiver_module.get()))) {
                 struct response *r = audio_receiver_process_message(s, (struct msg_receiver *) msg);
                 free_message(msg, r);
         }
-        while ((msg = check_message(&s->audio_sender_module))) {
+        while ((msg = check_message(s->audio_sender_module.get()))) {
                 struct response *r = audio_sender_process_message(s, (struct msg_sender *) msg);
                 free_message(msg, r);
         }
@@ -634,8 +636,6 @@ static void *audio_receiver_thread(void *arg)
         set_thread_name(__func__);
         struct state_audio *s = (struct state_audio *) arg;
         // rtp variables
-        struct timeval timeout, curr_time;
-        uint32_t ts;
         struct pdb_e *cp;
         struct audio_desc device_desc{};
         bool playback_supports_multiple_streams;
@@ -656,7 +656,7 @@ static void *audio_receiver_thread(void *arg)
         printf("Audio receiving started.\n");
         while (!should_exit) {
                 struct message *msg;
-                while((msg= check_message(&s->audio_receiver_module))) {
+                while((msg= check_message(s->audio_receiver_module.get()))) {
                         struct response *r = audio_receiver_process_message(s, (struct msg_receiver *) msg);
                         free_message(msg, r);
                 }
@@ -664,11 +664,11 @@ static void *audio_receiver_thread(void *arg)
                 bool decoded = false;
 
                 if (s->receiver == NET_NATIVE || s->receiver == NET_STANDARD) {
-                        gettimeofday(&curr_time, NULL);
-                        auto curr_time_hr = std::chrono::high_resolution_clock::now();
-                        ts = std::chrono::duration_cast<std::chrono::duration<double>>(s->start_time - std::chrono::steady_clock::now()).count() * 90000;
+                        time_ns_t curr_time = get_time_in_ns();
+                        uint32_t ts = (curr_time - s->start_time) / 100'000 * 9; // at 90000 Hz
                         rtp_update(s->audio_network_device, curr_time);
                         rtp_send_ctrl(s->audio_network_device, ts, 0, curr_time);
+                        struct timeval timeout;
                         timeout.tv_sec = 0;
                         // timeout.tv_usec = 999999 / 59.94; // audio goes almost always at the same rate
                                                              // as video frames
@@ -701,7 +701,7 @@ static void *audio_receiver_thread(void *arg)
                                         assert(dec_state != NULL);
                                         cp->decoder_state = dec_state;
                                         dec_state->enabled = true;
-                                        dec_state->pbuf_data.decoder = (struct state_audio_decoder *) audio_decoder_init(s->audio_channel_map, s->audio_scale, s->requested_encryption, (audio_playback_ctl_t) audio_playback_ctl, s->audio_playback_device, &s->audio_receiver_module);
+                                        dec_state->pbuf_data.decoder = (struct state_audio_decoder *) audio_decoder_init(s->audio_channel_map, s->audio_scale, s->requested_encryption, (audio_playback_ctl_t) audio_playback_ctl, s->audio_playback_device, s->audio_receiver_module.get());
                                         audio_decoder_set_volume(dec_state->pbuf_data.decoder, s->muted_receiver ? 0.0 : s->volume);
                                         assert(dec_state->pbuf_data.decoder != NULL);
                                         cp->decoder_state_deleter = audio_decoder_state_deleter;
@@ -713,14 +713,14 @@ static void *audio_receiver_thread(void *arg)
                                         // We iterate in loop since there can be more than one frmae present in
                                         // the playout buffer and it would be discarded by following pbuf_remove()
                                         // call.
-                                        while (pbuf_decode(cp->playout_buffer, curr_time_hr, s->receiver == NET_NATIVE ? decode_audio_frame : decode_audio_frame_mulaw, &dec_state->pbuf_data)) {
+                                        while (pbuf_decode(cp->playout_buffer, curr_time, s->receiver == NET_NATIVE ? decode_audio_frame : decode_audio_frame_mulaw, &dec_state->pbuf_data)) {
 
                                                 current_pbuf = &dec_state->pbuf_data;
                                                 decoded = true;
                                         }
                                 }
 
-                                pbuf_remove(cp->playout_buffer, curr_time_hr);
+                                pbuf_remove(cp->playout_buffer, curr_time);
                                 cp = pdb_iter_next(&it);
 
                                 if (decoded && !playback_supports_multiple_streams)
@@ -920,19 +920,17 @@ static void *asend_compute_and_print_stats(void *arg) {
                         d->frame.get_sample_count(),
                         d->seconds);
 
-        ostringstream volume_rms, volume_peak;
-        volume_rms << fixed << setprecision(2);
-        volume_peak << fixed << setprecision(2);
+        ostringstream volume;
+        volume << fixed << setprecision(2);
         using namespace std::string_literals;
         for (int i = 0; i < d->frame.get_channel_count(); ++i) {
                 double rms = 0.0;
                 double peak = 0.0;
                 rms = calculate_rms(&d->frame, i, &peak);
-                volume_rms << (i > 0 ? " "s : ""s) << 20.0 * log(rms) / log(10.0);
-                volume_peak << (i > 0 ? " "s : ""s) << 20.0 * log(peak) / log(10.0);
+                volume << (i > 0 ? " "s : ""s) << 20.0 * log(rms) / log(10.0) << "/" << 20.0 * log(peak) / log(10.0);
         }
 
-        LOG(LOG_LEVEL_INFO) << "[Audio sender] Volume: " << fg::green << style::bold << volume_rms.str() << style::reset << fg::reset << " dBFS RMS, " << fg::green << style::bold << volume_peak.str() << style::reset << fg::reset << " dBFS peak" << BOLD(RED((d->muted_sender ? " (muted)" : ""))) << ".\n" ;
+        LOG(LOG_LEVEL_INFO) << "[Audio sender] Volume: " << fg::green << style::bold << volume.str() << style::reset << fg::reset << " dBFS RMS/peak" << BOLD(RED((d->muted_sender ? " (muted)" : ""))) << "\n" ;
 
         delete d;
 
@@ -996,18 +994,17 @@ static void *audio_sender_thread(void *arg)
         audio_frame2_resampler resampler_state;
 
         printf("Audio sending started.\n");
+
         while (!should_exit) {
                 struct message *msg;
-                while((msg = check_message(&s->audio_sender_module))) {
+                while((msg = check_message(s->audio_sender_module.get()))) {
                         struct response *r = audio_sender_process_message(s, (struct msg_sender *) msg);
                         free_message(msg, r);
                 }
 
                 if ((s->audio_tx_mode & MODE_RECEIVER) == 0) { // otherwise receiver thread does the stuff...
-                        struct timeval curr_time;
-                        uint32_t ts;
-                        gettimeofday(&curr_time, NULL);
-                        ts = std::chrono::duration_cast<std::chrono::duration<double>>(s->start_time - std::chrono::steady_clock::now()).count() * 90000;
+                        time_ns_t curr_time = get_time_in_ns();
+                        uint32_t ts = (curr_time - s->start_time) / 10'0000 * 9; // at 90000 Hz
                         rtp_update(s->audio_network_device, curr_time);
                         rtp_send_ctrl(s->audio_network_device, ts, 0, curr_time);
 
@@ -1034,6 +1031,8 @@ static void *audio_sender_thread(void *arg)
                         if (s->paused) {
                                 continue;
                         }
+
+                        s->filter_chain.filter(&buffer);
 
                         audio_frame2 bf_n(buffer);
 

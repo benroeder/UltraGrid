@@ -180,12 +180,14 @@ static void audio_cap_ca_help(const char *driver_name)
         free(available_devices);
 }
 
-#define CHECK_OK(cmd, msg, action_failed) do { int ret = cmd; if (!ret) {\
-        log_msg(LOG_LEVEL_WARNING, MODULE_NAME "%s\n", (msg));\
+#define CA_STRINGIFY(A) #A
+
+#define CHECK_OK(cmd, msg, action_failed) do { OSErr ret = cmd; if (ret != noErr) {\
+        log_msg(strlen(CA_STRINGIFY(action_failed)) == 0 ? LOG_LEVEL_WARNING : LOG_LEVEL_ERROR, MODULE_NAME "%s: %d\n", (msg), ret);\
         action_failed;\
 }\
 } while(0)
-#define NOOP ((void)0)
+#define NOOP
 
 #ifdef __MAC_10_14
 // http://anasambri.com/ios/accessing-camera-and-photos-in-ios.html
@@ -205,7 +207,6 @@ static void * audio_cap_ca_init(const char *cfg)
                 audio_cap_ca_help(NULL);
                 return &audio_init_state_ok;
         }
-        struct state_ca_capture *s;
         OSErr ret = noErr;
 #ifndef __MAC_10_9
         Component comp;
@@ -243,7 +244,7 @@ static void * audio_cap_ca_init(const char *cfg)
         }
 #endif // defined __MAC_10_14
 
-        s = (struct state_ca_capture *) calloc(1, sizeof(struct state_ca_capture));
+        struct state_ca_capture *s = (struct state_ca_capture *) calloc(1, sizeof(struct state_ca_capture));
         pthread_mutex_init(&s->lock, NULL);
         pthread_cond_init(&s->cv, NULL);
         s->boss_waiting = FALSE;
@@ -288,85 +289,64 @@ static void * audio_cap_ca_init(const char *cfg)
         desc.componentFlags = 0;
         desc.componentFlagsMask = 0;
 
+        bool failed = true;
+        do {
 #ifdef __MAC_10_9
-        comp = AudioComponentFindNext(NULL, &desc);
-        if(!comp) {
-                fprintf(stderr, "Error finding AUHAL component.\n");
-                goto error;
-        }
-        ret = AudioComponentInstanceNew(comp, &s->auHALComponentInstance);
-        if (ret != noErr) {
-                fprintf(stderr, "Error opening AUHAL component.\n");
-                goto error;
-        }
+                comp = AudioComponentFindNext(NULL, &desc);
+                if(!comp) {
+                        fprintf(stderr, "Error finding AUHAL component.\n");
+                        break;
+                }
+                CHECK_OK(AudioComponentInstanceNew(comp, &s->auHALComponentInstance),
+                                "Error opening AUHAL component",
+                                break);
 #else
-        comp = FindNextComponent(NULL, &desc);
-        if(!comp) {
-                fprintf(stderr, "Error finding AUHAL component.\n");
-                goto error;
-        }
-        ret = OpenAComponent(comp, &s->auHALComponentInstance);
-        if (ret != noErr) {
-                fprintf(stderr, "Error opening AUHAL component.\n");
-                goto error;
-        }
+                comp = FindNextComponent(NULL, &desc);
+                if(!comp) {
+                        fprintf(stderr, "Error finding AUHAL component.\n");
+                        break;
+                }
+                CHECK_OK(OpenAComponent(comp, &s->auHALComponentInstance),
+                                "Error opening AUHAL component",
+                                break);
 #endif
-        UInt32 enableIO;
 
-        //When using AudioUnitSetProperty the 4th parameter in the method
-        //refer to an AudioUnitElement. When using an AudioOutputUnit
-        //the input element will be '1' and the output element will be '0'.
+                //When using AudioUnitSetProperty the 4th parameter in the method
+                //refer to an AudioUnitElement. When using an AudioOutputUnit
+                //the input element will be '1' and the output element will be '0'.
 
+                UInt32 enableIO = 1;
+                CHECK_OK(AudioUnitSetProperty(s->auHALComponentInstance,
+                                        kAudioOutputUnitProperty_EnableIO,
+                                        kAudioUnitScope_Input,
+                                        1, // input element
+                                        &enableIO,
+                                        sizeof(enableIO)),
+                                "Error enabling input on AUHAL", break);
 
-        enableIO = 1;
-        ret = AudioUnitSetProperty(s->auHALComponentInstance,
-                kAudioOutputUnitProperty_EnableIO,
-                kAudioUnitScope_Input,
-                1, // input element
-                &enableIO,
-                sizeof(enableIO));
-        if (ret != noErr) {
-                fprintf(stderr, "Error enabling input on AUHAL.\n");
-                goto error;
-        }
+                enableIO = 0;
+                CHECK_OK(AudioUnitSetProperty(s->auHALComponentInstance,
+                                        kAudioOutputUnitProperty_EnableIO,
+                                        kAudioUnitScope_Output,
+                                        0,   //output element
+                                        &enableIO,
+                                        sizeof(enableIO)),
+                                "Error disabling output on AUHAL", break);
 
-        enableIO = 0;
-        ret = AudioUnitSetProperty(s->auHALComponentInstance,
-                kAudioOutputUnitProperty_EnableIO,
-                kAudioUnitScope_Output,
-                0,   //output element
-                &enableIO,
-                sizeof(enableIO));
-        if (ret != noErr) {
-                fprintf(stderr, "Error disabling output on AUHAL.\n");
-                goto error;
-        }
-        
+                size=sizeof(device);
+                CHECK_OK(AudioUnitSetProperty(s->auHALComponentInstance,
+                                        kAudioOutputUnitProperty_CurrentDevice,
+                                        kAudioUnitScope_Global,
+                                        0,
+                                        &device,
+                                        sizeof(device)),
+                                "Error setting device to AUHAL instance", break);
 
-
-        size=sizeof(device);
-        ret = AudioUnitSetProperty(s->auHALComponentInstance,
-                         kAudioOutputUnitProperty_CurrentDevice, 
-                         kAudioUnitScope_Global, 
-                         0, 
-                         &device, 
-                         sizeof(device));
-        if(ret) {
-                fprintf(stderr, "[CoreAudio] Error setting device to AUHAL instance.\n");
-                goto error;
-        }
-
-
-        {
                 AudioStreamBasicDescription desc;
 
                 size = sizeof(desc);
-                ret = AudioUnitGetProperty(s->auHALComponentInstance, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input,
-                                1, &desc, &size);
-                if(ret) {
-                        fprintf(stderr, "[CoreAudio] Error getting default device properties.\n");
-                        goto error;
-                }
+                CHECK_OK(AudioUnitGetProperty(s->auHALComponentInstance, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input,
+                                1, &desc, &size), "Error getting default device properties", break);
 
                 desc.mChannelsPerFrame = s->frame.ch_count;
                 desc.mSampleRate = (double) s->frame.sample_rate;
@@ -384,46 +364,33 @@ static void * audio_cap_ca_init(const char *cfg)
                 desc.mBytesPerPacket = desc.mBytesPerFrame;
                 s->audio_packet_size = desc.mBytesPerPacket;
 
-                ret = AudioUnitSetProperty(s->auHALComponentInstance, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output,
-                                1, &desc, sizeof(desc));
-                if(ret) {
-                        fprintf(stderr, "[CoreAudio] Error setting device properties.\n");
-                        goto error;
-                }
+                CHECK_OK(AudioUnitSetProperty(s->auHALComponentInstance, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output,
+                                1, &desc, sizeof(desc)), "Error setting device properties", break);
 
                 AURenderCallbackStruct input;
                 input.inputProc = InputProc;
                 input.inputProcRefCon = s;
-                ret = AudioUnitSetProperty(s->auHALComponentInstance, kAudioOutputUnitProperty_SetInputCallback,
-                                kAudioUnitScope_Global, 0, &input, sizeof(input));
-                if(ret) {
-                        fprintf(stderr, "[CoreAudio] Error setting input callback.\n");
-                        goto error;
-                }
+                CHECK_OK(AudioUnitSetProperty(s->auHALComponentInstance, kAudioOutputUnitProperty_SetInputCallback,
+                                kAudioUnitScope_Global, 0, &input, sizeof(input)),
+                                "Error setting input callback", break);
                 uint32_t numFrames = 128;
                 if (get_commandline_param("audio-cap-frames")) {
                         numFrames = atoi(get_commandline_param("audio-cap-frames"));
                 }
                 CHECK_OK(AudioUnitSetProperty(s->auHALComponentInstance, kAudioDevicePropertyBufferFrameSize,
                                         kAudioUnitScope_Global, 0, &numFrames, sizeof(numFrames)),
-                                        "[CoreAudio] Error setting frames.", NOOP);
+                                        "Error setting frames", NOOP);
+
+                CHECK_OK(AudioUnitInitialize(s->auHALComponentInstance), "Error initializing device", break);
+                CHECK_OK(AudioOutputUnitStart(s->auHALComponentInstance), "Error starting device", break);
+                failed = false;
+        } while(0);
+
+        if (!failed) {
+                return s;
         }
 
-        ret = AudioUnitInitialize(s->auHALComponentInstance);
-        if(ret) {
-                fprintf(stderr, "[CoreAudio] Error initializing device.\n");
-                goto error;
-        }
-
-        ret = AudioOutputUnitStart(s->auHALComponentInstance);
-        if(ret) {
-                fprintf(stderr, "[CoreAudio] Error starting device.\n");
-                goto error;
-        }
-
-        return s;
-
-error:
+        // error accured
         pthread_mutex_destroy(&s->lock);
         pthread_cond_destroy(&s->cv);
         DestroyAudioBufferList(s->theBufferList);

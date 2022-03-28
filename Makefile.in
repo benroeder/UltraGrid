@@ -100,6 +100,9 @@ COMMON_OBJS     = \
 		src/audio/wav_reader.o \
 		src/audio/wav_writer.o \
 		@JACK_TRANS_OBJ@ \
+		src/audio/audio_filter.o \
+		src/audio/filter_chain.o \
+		src/audio/filter/delay.o \
 		src/capture_filter.o \
 		src/capture_filter/change_pixfmt.o \
 		src/capture_filter/disrupt.o \
@@ -113,6 +116,7 @@ COMMON_OBJS     = \
 		src/capture_filter/none.o \
 		src/capture_filter/split.o \
 		src/compat/alarm.o \
+		src/compat/dlfunc.o \
 		src/compat/drand48.o \
 		src/compat/gettimeofday.o \
 		src/compat/platform_pipe.o \

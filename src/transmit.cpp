@@ -80,11 +80,14 @@
 #include "tv.h"
 #include "transmit.h"
 #include "utils/jpeg_reader.h"
+#include "utils/math.h"
 #include "video.h"
 #include "video_codec.h"
 
 #include <algorithm>
+#include <array>
 #include <iostream>
+#include <vector>
 
 #define TRANSMIT_MAGIC	0xe80ab15f
 
@@ -105,6 +108,9 @@
 #endif
 
 #define DEFAULT_CIPHER_MODE MODE_AES128_CFB
+
+using std::array;
+using std::vector;
 
 static void tx_update(struct tx *tx, struct video_frame *frame, int substream);
 static void tx_done(struct module *tx);
@@ -474,59 +480,29 @@ static uint32_t format_interl_fps_hdr_row(enum interlacing_t interlacing, double
         return htonl(tmp);
 }
 
-static auto gcd(int a, int b)
-{
-        // Everything divides 0
-        if (a == 0) {
-                return b;
-        }
-        if (b == 0) {
-                return a;
-        }
-
-        // base case
-        if (a == b) {
-                return a;
-        }
-
-        // a is greater
-        if (a > b) {
-                return gcd(a-b, b);
-        }
-        return gcd(a, b-a);
-}
-
-static auto lcm(int a, int b) {
-        return a * b / gcd(a, b);
-}
-
-static inline int get_data_len(bool with_fec, int mtu, int hdrs_len,
+/**
+ * Adjusts size/alignment mtu to given constraints
+ * @note
+ * Except when with_fec==true and symbol is longer than mtu, the aligned packet
+ * size is always the same.
+ */
+static inline int get_video_pkt_len(bool with_fec, int mtu,
                 int fec_symbol_size, int *fec_symbol_offset, int pf_block_size)
 {
-        int data_len;
-        data_len = mtu - hdrs_len;
+        int alignment = pf_block_size;
         if (with_fec) {
-                if (fec_symbol_size <= mtu - hdrs_len) {
-                        data_len = data_len / fec_symbol_size * fec_symbol_size;
-                } else {
-                        if (fec_symbol_size - *fec_symbol_offset <= mtu - hdrs_len) {
-                                data_len = fec_symbol_size - *fec_symbol_offset;
+                if (fec_symbol_size > mtu) {
+                        if (fec_symbol_size - *fec_symbol_offset <= mtu) {
+                                mtu = fec_symbol_size - *fec_symbol_offset;
                                 *fec_symbol_offset = 0;
                         } else {
-                                *fec_symbol_offset += data_len;
+                                *fec_symbol_offset += mtu;
                         }
+                        return mtu;
                 }
-        } else {
-                if (pf_block_size == 0) {
-                        pf_block_size = 1; // compressed formats have usually 0
-                } else {
-                        pf_block_size = lcm(pf_block_size, 48); // 6/8 -> RGB/A convertible to UYVY (multiple of 2 pixs)
-                                                                // 48 -> RG48 to R12L
-                                                                // @todo figure out better solution
-                }
-                data_len = (data_len / pf_block_size) * pf_block_size;
+                alignment = fec_symbol_size;
         }
-        return data_len;
+        return mtu / alignment * alignment;
 }
 
 static inline void check_symbol_size(int fec_symbol_size, int payload_len)
@@ -548,6 +524,28 @@ static inline void check_symbol_size(int fec_symbol_size, int payload_len)
         status_printed = true;
 }
 
+/// @param mtu is tx->mtu - hdrs_len
+static vector<int> get_packet_sizes(struct video_frame *frame, int substream, int mtu) {
+        unsigned int fec_symbol_size = frame->fec_params.symbol_size;
+        vector<int> ret;
+
+        if (frame->fec_params.type != FEC_NONE) {
+                check_symbol_size(fec_symbol_size, mtu);
+        }
+
+        int fec_symbol_offset = 0;
+        int pf_block_size = is_codec_opaque(frame->color_spec) ? 1 : lcm(get_pf_block_size(frame->color_spec), 48); // 6/8 -> RGB/A convertible to UYVY (multiple of 2 pixs)
+                                                                                                                    // 48 -> RG48 to R12L; @todo figure out better solution
+        unsigned pos = 0;
+        do {
+                int len = get_video_pkt_len(frame->fec_params.type != FEC_NONE, mtu,
+                                        fec_symbol_size, &fec_symbol_offset, pf_block_size);
+                pos += len;
+                ret.push_back(len);
+        } while (pos < frame->tiles[substream].data_len);
+        return ret;
+}
+
 static void
 tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
                 uint32_t ts, int send_m,
@@ -560,14 +558,12 @@ tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
 
         struct tile *tile = &frame->tiles[substream];
 
-        int m, data_len;
+        int data_len;
         // see definition in rtp_callback.h
 
         uint32_t rtp_hdr[100];
         int rtp_hdr_len;
-        int pt;            /* A value specified in our packet format */
-        char *data;
-        unsigned int pos;
+        int pt = fec_pt_from_fec_type(TX_MEDIA_VIDEO, frame->fec_params.type, tx->encryption);            /* A value specified in our packet format */
 #ifdef HAVE_LINUX
         struct timespec start, stop;
 #elif defined HAVE_MACOSX
@@ -576,32 +572,16 @@ tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
 	LARGE_INTEGER start, stop, freq;
 #endif
         long delta, overslept = 0;
-        uint32_t tmp;
-        int mult_pos[FEC_MAX_MULT];
+        array <int, FEC_MAX_MULT> mult_pos{};
         int mult_index = 0;
-        int mult_first_sent = 0;
 
         int hdrs_len = (rtp_is_ipv6(rtp_session) ? 40 : 20) + 8 + 12; // IP hdr size + UDP hdr size + RTP hdr size
-        unsigned int fec_symbol_size = frame->fec_params.symbol_size;
 
         assert(tx->magic == TRANSMIT_MAGIC);
 
         tx_update(tx, frame, substream);
 
         perf_record(UVP_SEND, ts);
-
-        if(tx->fec_scheme == FEC_MULT) {
-                int i;
-                for (i = 0; i < tx->mult_count; ++i) {
-                        mult_pos[i] = 0;
-                }
-                mult_index = 0;
-        }
-
-        m = 0;
-        pos = 0;
-
-        pt = fec_pt_from_fec_type(TX_MEDIA_VIDEO, frame->fec_params.type, tx->encryption);
 
         if (frame->fec_params.type == FEC_NONE) {
                 hdrs_len += (sizeof(video_payload_hdr_t));
@@ -610,7 +590,7 @@ tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
         } else {
                 hdrs_len += (sizeof(fec_payload_hdr_t));
                 rtp_hdr_len = sizeof(fec_payload_hdr_t);
-                tmp = substream << 22;
+                uint32_t tmp = substream << 22;
                 tmp |= 0x3fffff & tx->buffer;
                 // see definition in rtp_callback.h
                 rtp_hdr[0] = htonl(tmp);
@@ -628,25 +608,8 @@ tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
                 rtp_hdr_len += sizeof(crypto_payload_hdr_t);
         }
 
-        if (frame->fec_params.type != FEC_NONE) {
-                check_symbol_size(fec_symbol_size, tx->mtu - hdrs_len);
-        }
-
-        int fec_symbol_offset = 0;
-
-        // calculate number of packets
-        int packet_count = 0;
-        do {
-                pos += get_data_len(frame->fec_params.type != FEC_NONE, tx->mtu, hdrs_len,
-                                fec_symbol_size, &fec_symbol_offset,
-                                get_pf_block_size(frame->color_spec));
-                packet_count += 1;
-        } while (pos < (unsigned int) tile->data_len);
-        if(tx->fec_scheme == FEC_MULT) {
-                packet_count *= tx->mult_count;
-        }
-        pos = 0;
-        fec_symbol_offset = 0;
+        vector<int> packet_sizes = get_packet_sizes(frame, substream, tx->mtu - hdrs_len);
+        long packet_count = packet_sizes.size() * (tx->fec_scheme == FEC_MULT ? tx->mult_count : 1);
 
         long packet_rate;
         if (tx->bitrate == RATE_UNLIMITED) {
@@ -687,8 +650,11 @@ tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
                 rtp_async_start(rtp_session, packet_count);
         }
 
+        int packet_idx = 0;
+        unsigned pos = 0;
         do {
                 GET_STARTTIME;
+                int m = 0;
                 if(tx->fec_scheme == FEC_MULT) {
                         pos = mult_pos[mult_index];
                 }
@@ -697,10 +663,8 @@ tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
 
                 rtp_hdr_packet[1] = htonl(offset);
 
-                data = tile->data + pos;
-                data_len = get_data_len(frame->fec_params.type != FEC_NONE, tx->mtu, hdrs_len,
-                                fec_symbol_size, &fec_symbol_offset,
-                                get_pf_block_size(frame->color_spec));
+                char *data = tile->data + pos;
+                data_len = packet_sizes.at(packet_idx);
                 if (pos + data_len >= (unsigned int) tile->data_len) {
                         if (send_m) {
                                 m = 1;
@@ -726,17 +690,15 @@ tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
                                   data, data_len, 0, 0, 0);
                 }
 
-                if(tx->fec_scheme == FEC_MULT) {
-                        mult_pos[mult_index] = pos;
-                        mult_first_sent ++;
-                        if(mult_index != 0 || mult_first_sent >= (tx->mult_count - 1))
-                                        mult_index = (mult_index + 1) % tx->mult_count;
+                if (mult_index + 1 == tx->mult_count) {
+                        ++packet_idx;
                 }
 
-                /* when trippling, we need all streams goes to end */
                 if(tx->fec_scheme == FEC_MULT) {
-                        pos = mult_pos[tx->mult_count - 1];
+                        mult_pos[mult_index] = pos;
+                        mult_index = (mult_index + 1) % tx->mult_count;
                 }
+
                 rtp_hdr_packet += rtp_hdr_len / sizeof(uint32_t);
 
                 // TRAFFIC SHAPER
@@ -748,7 +710,7 @@ tx_send_base(struct tx *tx, struct video_frame *frame, struct rtp *rtp_session,
                         overslept = -(packet_rate - delta - overslept);
                         //fprintf(stdout, "%ld ", overslept);
                 }
-        } while (pos < (unsigned int) tile->data_len);
+        } while (pos < tile->data_len || mult_index != 0); // when multiplying, we need all streams go to the end
 
         if (!tx->encryption) {
                 rtp_async_wait(rtp_session);
@@ -766,12 +728,9 @@ void audio_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame2 * 
                 return;
         }
 
-        int pt; /* PT set for audio in our packet format */
-        unsigned int pos = 0u,
-                     m = 0u;
+        int pt = fec_pt_from_fec_type(TX_MEDIA_AUDIO, buffer->get_fec_params(0).type, tx->encryption); /* PT set for audio in our packet format */
+        unsigned m = 0u;
         const char *chan_data;
-        int data_len;
-        const char *data;
         // see definition in rtp_callback.h
         uint32_t rtp_hdr[100];
         uint32_t timestamp;
@@ -783,16 +742,12 @@ void audio_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame2 * 
 	LARGE_INTEGER start, stop, freq;
 #endif
         long delta;
-        int mult_pos[FEC_MAX_MULT];
-        int mult_index = 0;
         int mult_first_sent = 0;
 
         fec_check_messages(tx);
 
         timestamp = get_local_mediatime();
         perf_record(UVP_SEND, timestamp);
-
-        pt = fec_pt_from_fec_type(TX_MEDIA_AUDIO, buffer->get_fec_params(0).type, tx->encryption);
 
         for (int channel = 0; channel < buffer->get_channel_count(); ++channel)
         {
@@ -801,15 +756,10 @@ void audio_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame2 * 
                 unsigned int fec_symbol_size = buffer->get_fec_params(channel).symbol_size;
 
                 chan_data = buffer->get_data(channel);
-                pos = 0u;
+                unsigned pos = 0u;
 
-                if(tx->fec_scheme == FEC_MULT) {
-                        int i;
-                        for (i = 0; i < tx->mult_count; ++i) {
-                                mult_pos[i] = 0;
-                        }
-                        mult_index = 0;
-                }
+                array <int, FEC_MAX_MULT> mult_pos{};
+                int mult_index = 0;
 
                 if (buffer->get_fec_params(0).type == FEC_NONE) {
                         hdrs_len += (sizeof(audio_payload_hdr_t));
@@ -875,8 +825,8 @@ void audio_tx_send(struct tx* tx, struct rtp *rtp_session, const audio_frame2 * 
                                 pos = mult_pos[mult_index];
                         }
 
-                        data = chan_data + pos;
-                        data_len = tx->mtu - hdrs_len;
+                        const char *data = chan_data + pos;
+                        int data_len = tx->mtu - hdrs_len;
                         if(pos + data_len >= (unsigned int) buffer->get_data_len(channel)) {
                                 data_len = buffer->get_data_len(channel) - pos;
                                 if(channel == buffer->get_channel_count() - 1)
@@ -944,7 +894,6 @@ void audio_tx_send_standard(struct tx* tx, struct rtp *rtp_session,
 	int pt;
 	uint32_t ts;
 	static uint32_t ts_prev = 0;
-	struct timeval curr_time;
 
 	// Configure the right Payload type,
 	// 8000 Hz, 1 channel and 2 bps is the ITU-T G.711 standard (should be 1 bps...)
@@ -1002,8 +951,7 @@ void audio_tx_send_standard(struct tx* tx, struct rtp *rtp_session,
                 } else {
                         ts = get_std_audio_local_mediatime((double) pkt_len / (double) buffer->get_channel_count() / (double) buffer->get_sample_rate(), buffer->get_sample_rate());
                 }
-                gettimeofday(&curr_time, NULL);
-                rtp_send_ctrl(rtp_session, ts_prev, 0, curr_time); //send RTCP SR
+                rtp_send_ctrl(rtp_session, ts_prev, 0, get_time_in_ns()); //send RTCP SR
                 ts_prev = ts;
                 // Send the packet
                 rtp_send_data(rtp_session, ts, pt, 0, 0, /* contributing sources 		*/
@@ -1037,10 +985,14 @@ void tx_send_h264(struct tx *tx, struct video_frame *frame,
 	int data_len = tile->data_len;
 	unsigned maxPacketSize = tx->mtu - 40;
 
-        alignas(8) char rtpenc_h264_state_buf[RTPENC_STATE_SIZE];
-        auto *rtpenc_h264_state = rtpenc_h264_init_state(rtpenc_h264_state_buf);
+        RTPENC_STATE_DECLARE(rtpenc_h264_state_buf);
+        auto *rtpenc_h264_state = rtpenc_h264_init_state(rtpenc_h264_state_buf, data, data_len);
+        if (rtpenc_h264_state == nullptr) {
+                return;
+        }
 
-        while ((nalsize = rtpenc_h264_frame_parse(rtpenc_h264_state, data, data_len)) > 0) {
+        bool eof = false;
+        while ((nalsize = rtpenc_h264_frame_parse(rtpenc_h264_state, &data, &eof)) > 0) {
                 bool lastNALUnitFragment = false; // by default
                 unsigned curNALOffset = 0;
 
@@ -1058,9 +1010,9 @@ void tx_send_h264(struct tx *tx, struct video_frame *frame,
 			if (curNALOffset == 0) { // case 1 or 2
 				if (nalsize	<= maxPacketSize) { // case 1
 
-					if (rtpenc_h264_have_seen_eof(rtpenc_h264_state)) m = 1;
+					if (eof) m = 1;
 					if (rtp_send_data(rtp_session, ts, pt, m, cc, &csrc,
-							(char *) rtpenc_h264_get_from_state(rtpenc_h264_state), nalsize,
+							(char *) data, nalsize,
 							extn, extn_len, extn_type) < 0) {
 						error_msg("There was a problem sending the RTP packet\n");
 					}
@@ -1069,12 +1021,12 @@ void tx_send_h264(struct tx *tx, struct video_frame *frame,
 					// We need to send the NAL unit data as FU packets.  Deliver the first
 					// packet now.  Note that we add "NAL header" and "FU header" bytes to the front
 					// of the packet (overwriting the existing "NAL header").
-					hdr[0] = (rtpenc_h264_get_from_state(rtpenc_h264_state)[0] & 0xE0) | 28; //FU indicator
-					hdr[1] = 0x80 | (rtpenc_h264_get_from_state(rtpenc_h264_state)[0] & 0x1F); // FU header (with S bit)
+					hdr[0] = (data[0] & 0xE0) | 28; //FU indicator
+					hdr[1] = 0x80 | (data[0] & 0x1F); // FU header (with S bit)
 
 					if (rtp_send_data_hdr(rtp_session, ts, pt, m, cc, &csrc,
 									(char *) hdr, 2,
-									(char *) rtpenc_h264_get_from_state(rtpenc_h264_state) + 1, maxPacketSize - 2,
+									(char *) data + 1, maxPacketSize - 2,
 									extn, extn_len, extn_type) < 0) {
 										error_msg("There was a problem sending the RTP packet\n");
 					}
@@ -1094,7 +1046,7 @@ void tx_send_h264(struct tx *tx, struct video_frame *frame,
 					// We can't send all of the remaining data this time:
 					if (rtp_send_data_hdr(rtp_session, ts, pt, m, cc, &csrc,
 							(char *) hdr, 2,
-							(char *) rtpenc_h264_get_from_state(rtpenc_h264_state) + curNALOffset,
+							(char *) data + curNALOffset,
 							maxPacketSize - 2, extn, extn_len,
 							extn_type) < 0) {
 								error_msg("There was a problem sending the RTP packet\n");
@@ -1105,23 +1057,19 @@ void tx_send_h264(struct tx *tx, struct video_frame *frame,
 
 				} else {
 					// This is the last fragment:
-					if (rtpenc_h264_have_seen_eof(rtpenc_h264_state)) m = 1;
+					if (eof) m = 1;
 
 					hdr[1] |= 0x40;// set the E bit in the FU header
 
 					if (rtp_send_data_hdr(rtp_session, ts, pt, m, cc, &csrc,
 									(char *) hdr, 2,
-									(char *) rtpenc_h264_get_from_state(rtpenc_h264_state) + curNALOffset,
+									(char *) data + curNALOffset,
 									nalsize, extn, extn_len, extn_type) < 0) {
 										error_msg("There was a problem sending the RTP packet\n");
 					}
 					lastNALUnitFragment = true;
 				}
 			}
-		}
-
-		if (rtpenc_h264_have_seen_eof(rtpenc_h264_state)){
-			return;
 		}
 	}
 }

@@ -69,6 +69,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cstdint>
 #include <iomanip>
 #include <mutex>
@@ -261,18 +262,14 @@ class DeckLinkTimecode : public IDeckLinkTimecode{
                         return S_OK;
                 }
                 virtual HRESULT STDMETHODCALLTYPE GetString (/* out */ BMD_STR *timecode) {
-#ifdef HAVE_LINUX
                         uint8_t hours, minutes, seconds, frames;
                         GetComponents(&hours, &minutes, &seconds, &frames);
                         char *out = (char *) malloc(14);
                         assert(minutes <= 59 && seconds <= 59);
                         sprintf(out, "%02" PRIu8 ":%02" PRIu8 ":%02" PRIu8 ":%02" PRIu8, hours, minutes, seconds, frames);
-                        *timecode = out;
-                        return S_OK;
-#else
-                        UNUSED(timecode);
-                        return E_FAIL;
-#endif
+                        *timecode = get_bmd_api_str_from_cstr(out);
+                        free(out);
+                        return *timecode ? S_OK : E_FAIL;
                 }
                 virtual BMDTimecodeFlags STDMETHODCALLTYPE GetFlags (void)        { return bmdTimecodeFlagDefault; }
                 virtual HRESULT STDMETHODCALLTYPE GetTimecodeUserBits (/* out */ BMDTimecodeUserBits *userBits) { if (!userBits) return E_POINTER; else return S_OK; }
@@ -436,6 +433,7 @@ public:
                         dst_frame_rate = (BASE * bmdAudioSampleRate48kHz - drift_samples) + 128; // slightly 1/2/48000 faster frame rate than computed
                         m_resample_level = -2;
                 }
+
                 if (dst_frame_rate != 0) {
                         auto *m = new msg_universal((string(MSG_UNIVERSAL_TAG_AUDIO_DECODER) + to_string(dst_frame_rate << ADEC_CH_RATE_SHIFT | BASE)).c_str());
                         LOG(LOG_LEVEL_VERBOSE) << MOD_NAME "Sending resample request " << m_resample_level << ": " << dst_frame_rate << "/" << BASE << "\n";
@@ -490,47 +488,46 @@ struct device_state {
 };
 
 struct state_decklink {
-        uint32_t            magic;
-
-        struct timeval      tv;
+        uint32_t            magic = DECKLINK_MAGIC;
+        chrono::high_resolution_clock::time_point t0 = chrono::high_resolution_clock::now();
 
         vector<struct device_state> state;
 
-        BMDTimeValue        frameRateDuration;
-        BMDTimeScale        frameRateScale;
+        BMDTimeValue        frameRateDuration{};
+        BMDTimeScale        frameRateScale{};
 
-        DeckLinkTimecode    *timecode; ///< @todo Should be actually allocated dynamically and
+        DeckLinkTimecode    *timecode{}; ///< @todo Should be actually allocated dynamically and
                                        ///< its lifespan controlled by AddRef()/Release() methods
 
-        struct video_desc   vid_desc;
-        struct audio_desc   aud_desc;
+        struct video_desc   vid_desc{};
+        struct audio_desc   aud_desc{};
 
-        unsigned long int   frames;
-        unsigned long int   frames_last;
-        bool                stereo;
-        bool                initialized_audio;
-        bool                initialized_video;
-        bool                emit_timecode;
-        int                 devices_cnt;
-        bool                play_audio; ///< the BMD device will be used also for output audio
+        unsigned long int   frames            = 0;
+        unsigned long int   frames_last       = 0;
+        bool                stereo            = false;
+        bool                initialized_audio = false;
+        bool                initialized_video = false;
+        bool                emit_timecode     = false;
+        int                 devices_cnt       = 1;
+        bool                play_audio        = false; ///< the BMD device will be used also for output audio
 
-        BMDPixelFormat      pixelFormat;
+        BMDPixelFormat      pixelFormat{};
 
-        uint32_t            link_req; // 0 default
-        uint32_t            profile_req; // BMD_OPT_DEFAULT, BMD_OPT_KEEP, bmdDuplexHalf or one of BMDProfileID
-        char                level; // 0 - undefined, 'A' - level A, 'B' - level B
+        uint32_t            link_req = BMD_OPT_DEFAULT;
+        uint32_t            profile_req = BMD_OPT_DEFAULT; // BMD_OPT_DEFAULT, BMD_OPT_KEEP, bmdDuplexHalf or one of BMDProfileID
+        char                sdi_dual_channel_level = BMD_OPT_DEFAULT; // 'A' - level A, 'B' - level B
         bool                quad_square_division_split = true;
         BMDVideoOutputConversionMode conversion_mode{};
-        HDRMetadata         requested_hdr_mode;
+        HDRMetadata         requested_hdr_mode{};
 
         buffer_pool_t       buffer_pool;
 
-        bool                low_latency;
+        bool                low_latency       = true;
 
         mutex               reconfiguration_lock; ///< for audio and video reconf to be mutually exclusive
 
         deck_audio_drift_fixer audio_drift_fixer;
-        
+
         uint32_t            last_buffered_samples;
         MovingAverage*      average_buffer_samples;
         int32_t             drift_since_last_correction;
@@ -642,6 +639,10 @@ display_decklink_getf(void *state)
         struct state_decklink *s = (struct state_decklink *)state;
         assert(s->magic == DECKLINK_MAGIC);
 
+        if (!s->initialized_video) {
+                return nullptr;
+        }
+
         struct video_frame *out = vf_alloc_desc(s->vid_desc);
         auto deckLinkFrames =  new vector<IDeckLinkMutableVideoFrame *>(s->devices_cnt);
         out->callbacks.dispose_udata = (void *) deckLinkFrames;
@@ -650,57 +651,55 @@ display_decklink_getf(void *state)
                 vf_free(frame);
         };
 
-        if (s->initialized_video) {
-                for (unsigned int i = 0; i < s->vid_desc.tile_count; ++i) {
-                        const int linesize = vc_get_linesize(s->vid_desc.width, s->vid_desc.color_spec);
-                        IDeckLinkMutableVideoFrame *deckLinkFrame = nullptr;
-                        lock_guard<mutex> lg(s->buffer_pool.lock);
+        for (unsigned int i = 0; i < s->vid_desc.tile_count; ++i) {
+                const int linesize = vc_get_linesize(s->vid_desc.width, s->vid_desc.color_spec);
+                IDeckLinkMutableVideoFrame *deckLinkFrame = nullptr;
+                lock_guard<mutex> lg(s->buffer_pool.lock);
 
-                        while (!s->buffer_pool.frame_queue.empty()) {
-                                auto tmp = s->buffer_pool.frame_queue.front();
-                                IDeckLinkMutableVideoFrame *frame;
-                                if (s->stereo)
-                                        frame = dynamic_cast<DeckLink3DFrame *>(tmp);
-                                else
-                                        frame = dynamic_cast<DeckLinkFrame *>(tmp);
-                                s->buffer_pool.frame_queue.pop();
-                                if (!frame || // wrong type
-                                                frame->GetWidth() != (long) s->vid_desc.width ||
-                                                frame->GetHeight() != (long) s->vid_desc.height ||
-                                                frame->GetRowBytes() != linesize ||
-                                                frame->GetPixelFormat() != s->pixelFormat) {
-                                        delete tmp;
-                                } else {
-                                        deckLinkFrame = frame;
-                                        deckLinkFrame->AddRef();
-                                        break;
-                                }
+                while (!s->buffer_pool.frame_queue.empty()) {
+                        auto tmp = s->buffer_pool.frame_queue.front();
+                        IDeckLinkMutableVideoFrame *frame;
+                        if (s->stereo)
+                                frame = dynamic_cast<DeckLink3DFrame *>(tmp);
+                        else
+                                frame = dynamic_cast<DeckLinkFrame *>(tmp);
+                        s->buffer_pool.frame_queue.pop();
+                        if (!frame || // wrong type
+                                        frame->GetWidth() != (long) s->vid_desc.width ||
+                                        frame->GetHeight() != (long) s->vid_desc.height ||
+                                        frame->GetRowBytes() != linesize ||
+                                        frame->GetPixelFormat() != s->pixelFormat) {
+                                delete tmp;
+                        } else {
+                                deckLinkFrame = frame;
+                                deckLinkFrame->AddRef();
+                                break;
                         }
-                        if (!deckLinkFrame) {
-                                if (s->stereo)
-                                        deckLinkFrame = DeckLink3DFrame::Create(s->vid_desc.width,
-                                                        s->vid_desc.height, linesize,
-                                                        s->pixelFormat, s->buffer_pool, s->requested_hdr_mode);
-                                else
-                                        deckLinkFrame = DeckLinkFrame::Create(s->vid_desc.width,
-                                                        s->vid_desc.height, linesize,
-                                                        s->pixelFormat, s->buffer_pool, s->requested_hdr_mode);
-                        }
-                        (*deckLinkFrames)[i] = deckLinkFrame;
+                }
+                if (!deckLinkFrame) {
+                        if (s->stereo)
+                                deckLinkFrame = DeckLink3DFrame::Create(s->vid_desc.width,
+                                                s->vid_desc.height, linesize,
+                                                s->pixelFormat, s->buffer_pool, s->requested_hdr_mode);
+                        else
+                                deckLinkFrame = DeckLinkFrame::Create(s->vid_desc.width,
+                                                s->vid_desc.height, linesize,
+                                                s->pixelFormat, s->buffer_pool, s->requested_hdr_mode);
+                }
+                (*deckLinkFrames)[i] = deckLinkFrame;
 
-                        deckLinkFrame->GetBytes((void **) &out->tiles[i].data);
+                deckLinkFrame->GetBytes((void **) &out->tiles[i].data);
 
-                        if (s->stereo) {
-                                IDeckLinkVideoFrame     *deckLinkFrameRight = nullptr;
-                                DeckLink3DFrame *frame3D = dynamic_cast<DeckLink3DFrame *>(deckLinkFrame);
-                                assert(frame3D != nullptr);
-                                frame3D->GetFrameForRightEye(&deckLinkFrameRight);
-                                deckLinkFrameRight->GetBytes((void **) &out->tiles[1].data);
-                                // release immedieatelly (parent still holds the reference)
-                                deckLinkFrameRight->Release();
+                if (s->stereo) {
+                        IDeckLinkVideoFrame     *deckLinkFrameRight = nullptr;
+                        DeckLink3DFrame *frame3D = dynamic_cast<DeckLink3DFrame *>(deckLinkFrame);
+                        assert(frame3D != nullptr);
+                        frame3D->GetFrameForRightEye(&deckLinkFrameRight);
+                        deckLinkFrameRight->GetBytes((void **) &out->tiles[1].data);
+                        // release immedieatelly (parent still holds the reference)
+                        deckLinkFrameRight->Release();
 
-                                ++i;
-                        }
+                        ++i;
                 }
         }
 
@@ -750,7 +749,6 @@ static void update_timecode(DeckLinkTimecode *tc, double fps)
 static int display_decklink_putf(void *state, struct video_frame *frame, int nonblock)
 {
         struct state_decklink *s = (struct state_decklink *)state;
-        struct timeval tv;
 
         if (frame == NULL)
                 return FALSE;
@@ -772,8 +770,6 @@ static int display_decklink_putf(void *state, struct video_frame *frame, int non
         BMDTimeValue blk_start_ticksPerFrame =0;
         s->state.at(0).deckLinkOutput->GetHardwareReferenceClock(s->frameRateScale, &blk_start_time, &blk_start_timeInFrame, &blk_start_ticksPerFrame);
         
-        gettimeofday(&tv, NULL);
-
         uint32_t i;
 
         s->state.at(0).deckLinkOutput->GetBufferedVideoFrameCount(&i);
@@ -807,6 +803,7 @@ static int display_decklink_putf(void *state, struct video_frame *frame, int non
 
         frame->callbacks.dispose(frame);
 
+
         LOG(LOG_LEVEL_DEBUG) << MOD_NAME "putf - " << i << " frames buffered, lasted " << setprecision(2) << chrono::duration_cast<chrono::duration<double>>(chrono::high_resolution_clock::now() - t0).count() * 1000.0 << " ms.\n";
         BMDTimeValue blk_end_time = 0;
         BMDTimeValue blk_end_timeInFrame = 0;
@@ -831,10 +828,11 @@ static int display_decklink_putf(void *state, struct video_frame *frame, int non
         LOG(LOG_LEVEL_VERBOSE) << MOD_NAME << " putf Video BlkMagic clock " << blk_start_time << " start, "
                                                                             << blk_end_time << " end, "
                                                                             << blk_end_time - blk_start_time <<" duration.\n";
+        auto t1 = chrono::high_resolution_clock::now();
+        LOG(LOG_LEVEL_DEBUG) << MOD_NAME "putf - " << i << " frames buffered, lasted " << setprecision(2) << chrono::duration_cast<chrono::duration<double>>(t1 - t0).count() * 1000.0 << " ms.\n";
 
-        gettimeofday(&tv, NULL);
-        double seconds = tv_diff(tv, s->tv);
-        if (seconds > 5) {
+        if (chrono::duration_cast<chrono::seconds>(t1 - s->t0).count() > 5) {
+                double seconds = chrono::duration_cast<chrono::duration<double>>(t1 - s->t0).count();
                 double fps = (s->frames - s->frames_last) / seconds;
                 if (log_level <= LOG_LEVEL_INFO) {
                         log_msg(LOG_LEVEL_INFO, MOD_NAME "%lu frames in %g seconds = %g FPS\n",
@@ -846,7 +844,7 @@ static int display_decklink_putf(void *state, struct video_frame *frame, int non
                                 << s->state.at(0).delegate->frames_dropped << " dropped, "
                                 << s->state.at(0).delegate->frames_flushed << " flushed cumulative)\n";
                 }
-                s->tv = tv;
+                s->t0 = t1;
                 s->frames_last = s->frames;
         }
 
@@ -1200,9 +1198,9 @@ static bool settings_init(struct state_decklink *s, const char *fmt,
                 } else if (strcasecmp(ptr, "half-duplex") == 0) {
                         s->profile_req = bmdDuplexHalf;
                 } else if (strcasecmp(ptr, "LevelA") == 0) {
-                        s->level = 'A';
+                        s->sdi_dual_channel_level = 'A';
                 } else if (strcasecmp(ptr, "LevelB") == 0) {
-                        s->level = 'B';
+                        s->sdi_dual_channel_level = 'B';
                 } else if (strncasecmp(ptr, "HDMI3DPacking=", strlen("HDMI3DPacking=")) == 0) {
                         char *packing = ptr + strlen("HDMI3DPacking=");
                         if (strcasecmp(packing, "SideBySideHalf") == 0) {
@@ -1326,8 +1324,6 @@ static void *display_decklink_init(struct module *parent, const char *fmt, unsig
                 delete s;
                 return NULL;
         }
-
-        gettimeofday(&s->tv, NULL);
 
         if (s->low_latency) {
                 LOG(LOG_LEVEL_NOTICE) << MOD_NAME "Using low-latency mode. "
@@ -1464,7 +1460,7 @@ static void *display_decklink_init(struct module *parent, const char *fmt, unsig
 
                 BMD_CONFIG_SET_INT(HDMI3DPacking, BMDVideo3DPackingFormat, bmdDeckLinkConfigHDMI3DPackingFormat, "3D packing");
 
-                if (s->level != 0) {
+                if (s->sdi_dual_channel_level != BMD_OPT_DEFAULT) {
 #if BLACKMAGIC_DECKLINK_API_VERSION < ((10 << 24) | (8 << 16))
                         log_msg(LOG_LEVEL_WARNING, MOD_NAME "Compiled with old SDK - cannot set 3G-SDI level.\n");
 #else
@@ -1473,12 +1469,12 @@ static void *display_decklink_init(struct module *parent, const char *fmt, unsig
 				if (deckLinkAttributes->GetFlag(BMDDeckLinkSupportsSMPTELevelAOutput, &supports_level_a) != S_OK) {
 					log_msg(LOG_LEVEL_WARNING, MOD_NAME "Could figure out if device supports Level A 3G-SDI.\n");
 				} else {
-					if (s->level == 'A' && supports_level_a == BMD_FALSE) {
+					if (s->sdi_dual_channel_level == 'A' && supports_level_a == BMD_FALSE) {
 						log_msg(LOG_LEVEL_WARNING, MOD_NAME "Device does not support Level A 3G-SDI!\n");
 					}
 				}
 			}
-                        HRESULT res = deckLinkConfiguration->SetFlag(bmdDeckLinkConfigSMPTELevelAOutput, s->level == 'A');
+                        HRESULT res = deckLinkConfiguration->SetFlag(bmdDeckLinkConfigSMPTELevelAOutput, s->sdi_dual_channel_level == 'A');
                         if(res != S_OK) {
                                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Unable set output 3G-SDI level.\n");
                         }
@@ -1746,6 +1742,7 @@ static void display_decklink_put_audio_frame(void *state, struct audio_frame *fr
         if (!s->audio_drift_fixer.update(buffered, sampleFrameCount)) {
                 return;
         }
+
         s->average_buffer_samples->add((double)buffered);
         // do we have enough samples to work out what the drift is
         if (s->average_buffer_samples->filled()) {
@@ -1792,7 +1789,6 @@ static void display_decklink_put_audio_frame(void *state, struct audio_frame *fr
                 s->state[0].deckLinkOutput->ScheduleAudioSamples(frame->data, sampleFrameCount, 0,
                                 0, &sampleFramesWritten);
                 if (sampleFramesWritten != sampleFrameCount) {
-                        // LOG(LOG_LEVEL_WARNING) << MOD_NAME << "audio buffer overflow!\n";
                         LOG(LOG_LEVEL_WARNING) << MOD_NAME << "audio buffer overflow! no_low_latency " << sampleFrameCount
                                                        << " samples written, " << sampleFramesWritten << " written, " 
                                                        << sampleFrameCount - sampleFramesWritten<<" diff, "<<buffered<< " buffer size.\n";

@@ -90,6 +90,7 @@
 #include "playback.h"
 #include "rtp/rtp.h"
 #include "rtsp/rtsp_utils.h"
+#include "tv.h"
 #include "ug_runtime_error.hpp"
 #include "utils/color_out.h"
 #include "utils/misc.h"
@@ -124,6 +125,7 @@ static constexpr const char *DEFAULT_AUDIO_CODEC = "PCM";
 #define OPT_AUDIO_DELAY (('A' << 8) | 'D')
 #define OPT_AUDIO_PROTOCOL (('A' << 8) | 'P')
 #define OPT_AUDIO_SCALE (('a' << 8) | 's')
+#define OPT_AUDIO_FILTER (('a' << 8) | 'f')
 #define OPT_CAPABILITIES (('C' << 8) | 'C')
 #define OPT_CAPTURE_FILTER (('O' << 8) | 'F')
 #define OPT_CONTROL_PORT (('C' << 8) | 'P')
@@ -658,7 +660,8 @@ struct ug_options {
                 .channel_map = nullptr,
                 .scale = "mixauto",
                 .echo_cancellation = false,
-                .codec_cfg = nullptr
+                .codec_cfg = nullptr,
+                .filter_cfg = ""
         };
         // NULL terminated array of capture devices
         struct vidcap_params *vidcap_params_head = vidcap_params_allocate();
@@ -722,6 +725,7 @@ static int parse_options(int argc, char *argv[], struct ug_options *opt) {
                 {"audio-scale", required_argument, 0, OPT_AUDIO_SCALE},
                 {"audio-capture-channels", required_argument, 0, OPT_AUDIO_CAPTURE_CHANNELS},
                 {"audio-capture-format", required_argument, 0, OPT_AUDIO_CAPTURE_FORMAT},
+                {"audio-filter", required_argument, 0, OPT_AUDIO_FILTER},
                 {"echo-cancellation", no_argument, 0, OPT_ECHO_CANCELLATION},
                 {"fullhelp", no_argument, 0, OPT_FULLHELP},
                 {"cuda-device", required_argument, 0, OPT_CUDA_DEVICE},
@@ -943,6 +947,9 @@ static int parse_options(int argc, char *argv[], struct ug_options *opt) {
                         if (!parse_audio_capture_format(optarg)) {
                                 return EXIT_FAIL_USAGE;
                         }
+                        break;
+                case OPT_AUDIO_FILTER:
+                        opt->audio.filter_cfg = optarg;
                         break;
                 case OPT_ECHO_CANCELLATION:
                         opt->audio.echo_cancellation = true;
@@ -1331,7 +1338,7 @@ int main(int argc, char *argv[])
         struct exporter *exporter = NULL;
         int ret;
 
-        const chrono::steady_clock::time_point start_time(chrono::steady_clock::now());
+        time_ns_t start_time = get_time_in_ns();
 
         struct ug_nat_traverse *nat_traverse = nullptr;
 
@@ -1398,7 +1405,7 @@ int main(int argc, char *argv[])
         uv.audio = audio_cfg_init (&uv.root_module, &opt.audio,
                         opt.requested_encryption,
                         opt.force_ip_version, opt.requested_mcast_if,
-                        opt.bitrate, &audio_offset, &start_time,
+                        opt.bitrate, &audio_offset, start_time,
                         opt.requested_mtu, opt.requested_ttl, exporter);
         if(!uv.audio) {
                 exit_uv(EXIT_FAIL_AUDIO);
@@ -1504,7 +1511,7 @@ int main(int argc, char *argv[])
                 params["fec"].str = opt.requested_video_fec;
                 params["encryption"].str = opt.requested_encryption;
                 params["bitrate"].ll = opt.bitrate;
-                params["start_time"].cptr = (const void *) &start_time;
+                params["start_time"].ll = start_time;
                 params["video_delay"].vptr = (volatile void *) &video_offset;
 
                 // UltraGrid RTP

@@ -89,6 +89,7 @@ struct state_ca_playback {
         steady_clock::time_point last_audio_read;
         bool quiet; ///< do not report buffer underruns if we do not receive data at all for a long period
         bool initialized;
+        int buf_len_ms = DEFAULT_BUFLEN_MS;
 };
 
 static OSStatus theRenderProc(void *inRefCon,
@@ -109,24 +110,23 @@ static OSStatus theRenderProc(void *inRefCon,
 
         struct state_ca_playback * s = (struct state_ca_playback *) inRefCon;
         int write_bytes = inNumFrames * s->audio_packet_size;
-        int ret;
 
-        ret = s->buffer_fns->read(s->buffer, (char *) ioData->mBuffers[0].mData, write_bytes);
+        int ret = s->buffer_fns->read(s->buffer, (char *) ioData->mBuffers[0].mData, write_bytes);
         ioData->mBuffers[0].mDataByteSize = ret;
 
         if(ret < write_bytes) {
                 if (!s->quiet) {
-                        fprintf(stderr, "[CoreAudio] Audio buffer underflow.\n");
+                        LOG(LOG_LEVEL_WARNING) << MOD_NAME "Audio buffer underflow (" << write_bytes << " requested, " << ret << " written).\n";
                 }
                 //memset(ioData->mBuffers[0].mData, 0, write_bytes);
                 ioData->mBuffers[0].mDataByteSize = ret;
                 if (!s->quiet && duration_cast<seconds>(steady_clock::now() - s->last_audio_read).count() > NO_DATA_STOP_SEC) {
-                        fprintf(stderr, "[CoreAudio] No data for %d seconds! Stopping.\n", NO_DATA_STOP_SEC);
+                        LOG(LOG_LEVEL_WARNING) << MOD_NAME "No data for " << NO_DATA_STOP_SEC << " seconds! Stopping.\n";
                         s->quiet = true;
                 }
         } else {
                 if (s->quiet) {
-                        fprintf(stderr, "[CoreAudio] Starting again.\n");
+                        LOG(LOG_LEVEL_NOTICE) << MOD_NAME "Starting again.\n";
                 }
                 s->quiet = false;
                 s->last_audio_read = steady_clock::now();
@@ -163,19 +163,18 @@ static int audio_play_ca_reconfigure(void *state, struct audio_desc desc)
         OSErr ret = noErr;
         AURenderCallbackStruct  renderStruct;
 
-        printf("[CoreAudio] Audio reinitialized to %d-bit, %d channels, %d Hz\n",
-                        desc.bps * 8, desc.ch_count, desc.sample_rate);
+        LOG(LOG_LEVEL_NOTICE) << MOD_NAME "Audio reinitialized to " << desc.bps * 8 << "-bit, " << desc.ch_count << " channels, " << desc.sample_rate << " Hz\n";
 
         if (s->initialized) {
                 ret = AudioOutputUnitStop(s->auHALComponentInstance);
                 if(ret) {
-                        fprintf(stderr, "[CoreAudio playback] Cannot stop AUHAL instance.\n");
+                        LOG(LOG_LEVEL_ERROR) << MOD_NAME "Cannot stop AUHAL instance.\n";
                         goto error;
                 }
 
                 ret = AudioUnitUninitialize(s->auHALComponentInstance);
                 if(ret) {
-                        fprintf(stderr, "[CoreAudio playback] Cannot uninitialize AUHAL instance.\n");
+                        LOG(LOG_LEVEL_ERROR) << MOD_NAME "Cannot uninitialize AUHAL instance.\n";
                         goto error;
                 }
                 s->initialized = false;
@@ -190,20 +189,15 @@ static int audio_play_ca_reconfigure(void *state, struct audio_desc desc)
         }
 
         {
-                int buf_len_ms = DEFAULT_BUFLEN_MS;
-                if (get_commandline_param("audio-buffer-len")) {
-                        buf_len_ms = atoi(get_commandline_param("audio-buffer-len"));
-                        assert(buf_len_ms > 0 && buf_len_ms < 10000);
-                }
                 if (get_commandline_param("audio-disable-adaptive-buffer") != nullptr || get_commandline_param("ca-disable-adaptive-buf") != nullptr) {
                         if (get_commandline_param("ca-disable-adaptive-buf") != nullptr) {
                                 LOG(LOG_LEVEL_WARNING) << MOD_NAME "Param \"ca-disable-adaptive-buf\" is deprecated, use audio-disable-adaptive-bufer instead.\n";
                         }
-                        int buf_len = desc.bps * desc.ch_count * (desc.sample_rate * buf_len_ms / 1000);
+                        int buf_len = desc.bps * desc.ch_count * (desc.sample_rate * s->buf_len_ms / 1000);
                         s->buffer = ring_buffer_init(buf_len);
                         s->buffer_fns = &ring_buffer_fns;
                 } else {
-                        s->buffer = audio_buffer_init(desc.sample_rate, desc.bps, desc.ch_count, buf_len_ms);
+                        s->buffer = audio_buffer_init(desc.sample_rate, desc.bps, desc.ch_count, s->buf_len_ms);
                         s->buffer_fns = &audio_buffer_fns;
                 }
         }
@@ -212,7 +206,7 @@ static int audio_play_ca_reconfigure(void *state, struct audio_desc desc)
         ret = AudioUnitGetProperty(s->auHALComponentInstance, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input,
                         0, &stream_desc, &size);
         if(ret) {
-                fprintf(stderr, "[CoreAudio playback] Cannot get device format from AUHAL instance.\n");
+                LOG(LOG_LEVEL_ERROR) << MOD_NAME "Cannot get device format from AUHAL instance.\n";
                 goto error;
         }
         stream_desc.mSampleRate = desc.sample_rate;
@@ -226,7 +220,7 @@ static int audio_play_ca_reconfigure(void *state, struct audio_desc desc)
         ret = AudioUnitSetProperty(s->auHALComponentInstance, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input,
                         0, &stream_desc, sizeof(stream_desc));
         if(ret) {
-                fprintf(stderr, "[CoreAudio playback] Cannot set device format to AUHAL instance.\n");
+                LOG(LOG_LEVEL_ERROR) << "Cannot set device format to AUHAL instance.\n";
                 goto error;
         }
 
@@ -235,19 +229,19 @@ static int audio_play_ca_reconfigure(void *state, struct audio_desc desc)
         ret = AudioUnitSetProperty(s->auHALComponentInstance, kAudioUnitProperty_SetRenderCallback,
                         kAudioUnitScope_Input, 0, &renderStruct, sizeof(AURenderCallbackStruct));
         if(ret) {
-                fprintf(stderr, "[CoreAudio playback] Cannot register audio processing callback.\n");
+                LOG(LOG_LEVEL_ERROR) << MOD_NAME "Cannot register audio processing callback.\n";
                 goto error;
         }
 
         ret = AudioUnitInitialize(s->auHALComponentInstance);
         if(ret) {
-                fprintf(stderr, "[CoreAudio playback] Cannot initialize AUHAL.\n");
+                LOG(LOG_LEVEL_ERROR) << MOD_NAME "Cannot initialize AUHAL.\n";
                 goto error;
         }
 
         ret = AudioOutputUnitStart(s->auHALComponentInstance);
         if(ret) {
-                fprintf(stderr, "[CoreAudio playback] Cannot start AUHAL.\n");
+                LOG(LOG_LEVEL_ERROR) << MOD_NAME "Cannot start AUHAL.\n";
                 goto error;
         }
 
@@ -268,19 +262,19 @@ static bool is_requested_direction(AudioObjectPropertyAddress propertyAddress, A
         propertyAddress.mSelector = kAudioDevicePropertyStreamConfiguration;
         status = AudioObjectGetPropertyDataSize(*audioDevice, &propertyAddress, 0, NULL, &size);
         if(kAudioHardwareNoError != status) {
-                fprintf(stderr, "AudioObjectGetPropertyDataSize (kAudioDevicePropertyStreamConfiguration) failed: %i\n", status);
+                LOG(LOG_LEVEL_ERROR) << MOD_NAME "AudioObjectGetPropertyDataSize (kAudioDevicePropertyStreamConfiguration) failed: " << status << "\n";
                 return false;
         }
 
         AudioBufferList *bufferList = static_cast<AudioBufferList *>(malloc(size));
         if(NULL == bufferList) {
-                fputs("Unable to allocate memory", stderr);
+                LOG(LOG_LEVEL_ERROR) << MOD_NAME "Unable to allocate memory\n";
                 return false;
         }
         status = AudioObjectGetPropertyData(*audioDevice, &propertyAddress, 0, NULL, &size, bufferList);
         if(kAudioHardwareNoError != status || 0 == bufferList->mNumberBuffers) {
                 if(kAudioHardwareNoError != status)
-                        fprintf(stderr, "AudioObjectGetPropertyData (kAudioDevicePropertyStreamConfiguration) failed: %i\n", status);
+                        LOG(LOG_LEVEL_ERROR) << MOD_NAME "AudioObjectGetPropertyData (kAudioDevicePropertyStreamConfiguration) failed: " << status << "\n";
                 free(bufferList);
                 return false;
         }
@@ -342,7 +336,7 @@ void audio_ca_probe(struct device_info **available_devices, int *count, int dir)
         return;
 
 error:
-        fprintf(stderr, "[CoreAudio] error obtaining device list.\n");
+        LOG(LOG_LEVEL_ERROR) << MOD_NAME "Error obtaining device list.\n";
 }
 
 static void audio_play_ca_probe(struct device_info **available_devices, int *count)
@@ -366,7 +360,6 @@ static void audio_play_ca_help(const char *driver_name)
 
 static void * audio_play_ca_init(const char *cfg)
 {
-        struct state_ca_playback *s;
         OSErr ret = noErr;
 #ifndef __MAC_10_9
         Component comp;
@@ -378,7 +371,15 @@ static void * audio_play_ca_init(const char *cfg)
         UInt32 size;
         AudioDeviceID device;
 
-        s = new struct state_ca_playback();
+        struct state_ca_playback *s = new struct state_ca_playback();
+
+        if (const char *val = get_commandline_param("audio-buffer-len")) {
+                s->buf_len_ms = atoi(val);
+                if (s->buf_len_ms <= 0 || s->buf_len_ms >= 10000) {
+                        LOG(LOG_LEVEL_ERROR) << MOD_NAME "Wrong value \"" <<  val << "\" given to \"audio-buffer-len\", allowed range (0, 10000).\n";
+                        goto error;
+                }
+        }
 
         //There are several different types of Audio Units.
         //Some audio units serve as Outputs, Mixers, or DSP

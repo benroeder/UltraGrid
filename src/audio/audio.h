@@ -53,6 +53,7 @@
 #define PORT_AUDIO              5006
 
 #include "audio/types.h"
+#include "tv.h"
 
 struct module;
 struct state_audio;
@@ -73,6 +74,7 @@ struct audio_options {
         const char *scale = "none";
         bool echo_cancellation = false;
         const char *codec_cfg = "PCM";
+        const char *filter_cfg = "";
 };
 
 struct state_audio * audio_cfg_init(struct module *parent,
@@ -80,7 +82,7 @@ struct state_audio * audio_cfg_init(struct module *parent,
                 const char *encryption,
                 int force_ip_version, const char *mcast_iface,
                 long long int bitrate, volatile int *audio_delay,
-                const std::chrono::steady_clock::time_point *start_time,
+                time_ns_t start_time,
                 int mtu, int ttl, struct exporter *exporter);
 #endif
 

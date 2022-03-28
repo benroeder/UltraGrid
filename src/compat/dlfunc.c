@@ -1,9 +1,10 @@
+/**
+ * @file   compat/dlfunc.c
+ * @author Martin Pulec     <pulec@cesnet.cz>
+ */
 /*
- * AUTHOR:  Gerard Castillo <gerard.castillo@i2cat.net>,
- * 			David Cassany   <david.cassany@i2cat.net>
- *
- *
- * Copyright (c) 2005-2010 Fundació i2CAT, Internet I Innovació Digital a Catalunya
+ * Copyright (c) 2012-2022 CESNET, z. s. p. o.
+ * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, is permitted provided that the following conditions
@@ -16,14 +17,8 @@
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
  *
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *
- *      This product includes software developed by the University of Southern
- *      California Information Sciences Institute.
- *
- * 4. Neither the name of the University nor of the Institute may be used
- *    to endorse or promote products derived from this software without
+ * 3. Neither the name of CESNET nor the names of its contributors may be
+ *    used to endorse or promote products derived from this software without
  *    specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS
@@ -38,32 +33,27 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
 
-#ifndef _RTP_ENC_H264_H
-#define _RTP_ENC_H264_H
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#include "config_unix.h"
+#include "config_win32.h"
+#endif // HAVE_CONFIG_H
 
-#ifndef __cplusplus
-#include <stdalign.h>
-#include <stdbool.h>
-#endif // ! defined __cplusplus
+#include "dlfunc.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#define RTPENC_STATE_ALIGN alignof(unsigned char *)
-#define RTPENC_STATE_SIZE 64
-#define RTPENC_STATE_DECLARE(var) alignas(RTPENC_STATE_ALIGN) char (var)[RTPENC_STATE_SIZE]
-struct rtpenc_h264_state;
-
-// functions documented at definition
-struct rtpenc_h264_state *rtpenc_h264_init_state(void *buf, unsigned char *buf_in, long size);
-long rtpenc_h264_frame_parse(struct rtpenc_h264_state *rtpench264state, unsigned char **start, bool *last);
-
-#ifdef __cplusplus
+#ifdef _WIN32
+char *dlerror() {
+        _Thread_local static char buf[1024] = "(unknown)";
+        FormatMessageA (FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,   // flags
+                        NULL,                // lpsource
+                        GetLastError(),                   // message id
+                        MAKELANGID (LANG_NEUTRAL, SUBLANG_DEFAULT),    // languageid
+                        buf, // output buffer
+                        sizeof buf, // size of msgbuf, bytes
+                        NULL);               // va_list of arguments
+        return buf;
 }
 #endif
 
-#endif
