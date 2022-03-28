@@ -368,9 +368,19 @@ static void audio_play_decklink_put_frame(void *state, struct audio_frame *frame
         
 	s->deckLinkOutput->ScheduleAudioSamples (data, sampleFrameCount, 0,
                 0, &sampleFramesWritten);
-        if(sampleFramesWritten != sampleFrameCount)
+        if(sampleFramesWritten != sampleFrameCount) {
+                if (sampleFrameCount < sampleFramesWritten){
+                        LOG(LOG_LEVEL_WARNING) << MOD_NAME << "audio buffer overflow! low_latency count=" << sampleFrameCount
+                                                << " written="<<sampleFramesWritten << "diff=" 
+                                                << sampleFrameCount - sampleFramesWritten<< "\n";
+                } else {
+                        LOG(LOG_LEVEL_WARNING) << MOD_NAME << "audio buffer OVERWROTE! low_latency count=" << sampleFrameCount
+                                                << " written="<<sampleFramesWritten << "diff=" 
+                                                << sampleFrameCount - sampleFramesWritten<< "\n";
+                }
+        
                 fprintf(stderr, "[decklink] audio buffer underflow!\n");
-
+        }
         free(tmp_frame.data);
 
 }
