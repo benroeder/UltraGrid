@@ -124,6 +124,7 @@ struct state_overlay {
                 long long decode_time_ns;       // Time spent decoding to RGBA
                 long long encode_time_ns;       // Time spent encoding from RGBA
                 long frame_count;               // Number of frames processed
+                long native_blend_count;        // Number of frames using native blending
                 long overlay_reloads;           // Number of times overlay was reloaded
                 long scale_operations;          // Number of scaling operations
                 time_t last_report_time;        // Last time we reported stats
@@ -529,185 +530,6 @@ static struct video_frame *overlay_getf(void *state)
         return s->in;
 }
 
-#ifdef __SSE2__
-// SSE2 alpha blending - process 4 pixels at once
-static inline void blend_line_sse2(unsigned char * __restrict rgba_line, 
-                                  const unsigned char * __restrict overlay_line,
-                                  int width)
-{
-        // Constants for blending
-        const __m128i zero = _mm_setzero_si128();
-        const __m128i alpha_mask = _mm_set1_epi32(0xFF000000);
-        const __m128i ones = _mm_set1_epi16(1);
-        
-        int x = 0;
-        
-        // Process 4 pixels at a time
-        for (; x <= width - 4; x += 4) {
-                // Load 4 pixels from overlay and video (16 bytes each)
-                __m128i overlay = _mm_loadu_si128((const __m128i*)(overlay_line + x * 4));
-                __m128i video = _mm_loadu_si128((const __m128i*)(rgba_line + x * 4));
-                
-                // Separate into two 8x16bit vectors for processing
-                __m128i overlay_lo = _mm_unpacklo_epi8(overlay, zero);
-                __m128i overlay_hi = _mm_unpackhi_epi8(overlay, zero);
-                __m128i video_lo = _mm_unpacklo_epi8(video, zero);
-                __m128i video_hi = _mm_unpackhi_epi8(video, zero);
-                
-                // Extract alpha values (every 4th byte) and expand to 16-bit
-                __m128i alpha_bytes = _mm_srli_epi32(overlay, 24);
-                __m128i alpha_lo = _mm_unpacklo_epi16(alpha_bytes, alpha_bytes);
-                __m128i alpha_hi = _mm_unpackhi_epi16(alpha_bytes, alpha_bytes);
-                alpha_lo = _mm_unpacklo_epi16(alpha_lo, alpha_lo);
-                alpha_hi = _mm_unpacklo_epi16(alpha_hi, alpha_hi);
-                
-                // Calculate inverse alpha (255 - alpha)
-                __m128i inv_alpha_lo = _mm_sub_epi16(_mm_set1_epi16(255), alpha_lo);
-                __m128i inv_alpha_hi = _mm_sub_epi16(_mm_set1_epi16(255), alpha_hi);
-                
-                // Blend: result = (overlay * alpha + video * inv_alpha + 128) / 255
-                // Adding 128 for rounding
-                __m128i result_lo = _mm_mullo_epi16(overlay_lo, alpha_lo);
-                result_lo = _mm_add_epi16(result_lo, _mm_mullo_epi16(video_lo, inv_alpha_lo));
-                result_lo = _mm_add_epi16(result_lo, _mm_set1_epi16(128));
-                result_lo = _mm_mulhi_epu16(result_lo, _mm_set1_epi16(0x8081)); // Divide by 255
-                
-                __m128i result_hi = _mm_mullo_epi16(overlay_hi, alpha_hi);
-                result_hi = _mm_add_epi16(result_hi, _mm_mullo_epi16(video_hi, inv_alpha_hi));
-                result_hi = _mm_add_epi16(result_hi, _mm_set1_epi16(128));
-                result_hi = _mm_mulhi_epu16(result_hi, _mm_set1_epi16(0x8081)); // Divide by 255
-                
-                // Pack back to 8-bit
-                __m128i result = _mm_packus_epi16(result_lo, result_hi);
-                
-                // Force alpha to 255
-                result = _mm_or_si128(result, alpha_mask);
-                
-                // Store result
-                _mm_storeu_si128((__m128i*)(rgba_line + x * 4), result);
-        }
-        
-        // Handle remaining pixels
-        for (; x < width; x++) {
-                const unsigned char *overlay_pixel = overlay_line + x * 4;
-                unsigned char *rgba_pixel = rgba_line + x * 4;
-                
-                unsigned char r = overlay_pixel[0];
-                unsigned char g = overlay_pixel[1];
-                unsigned char b = overlay_pixel[2];
-                unsigned char a = overlay_pixel[3];
-                
-                rgba_pixel[0] = (r * a + rgba_pixel[0] * (255 - a)) / 255;
-                rgba_pixel[1] = (g * a + rgba_pixel[1] * (255 - a)) / 255;
-                rgba_pixel[2] = (b * a + rgba_pixel[2] * (255 - a)) / 255;
-                rgba_pixel[3] = 255;
-        }
-}
-#endif
-
-#ifdef __AVX2__
-// AVX2 alpha blending - process 8 pixels at once
-static inline void blend_line_avx2(unsigned char * __restrict rgba_line, 
-                                  const unsigned char * __restrict overlay_line,
-                                  int width)
-{
-        // Constants for blending
-        const __m256i zero = _mm256_setzero_si256();
-        const __m256i alpha_mask = _mm256_set1_epi32(0xFF000000);
-        
-        int x = 0;
-        
-        // Process 8 pixels at a time
-        for (; x <= width - 8; x += 8) {
-                // Load 8 pixels from overlay and video (32 bytes each)
-                __m256i overlay = _mm256_loadu_si256((const __m256i*)(overlay_line + x * 4));
-                __m256i video = _mm256_loadu_si256((const __m256i*)(rgba_line + x * 4));
-                
-                // Separate into 16-bit values for processing
-                __m256i overlay_lo = _mm256_unpacklo_epi8(overlay, zero);
-                __m256i overlay_hi = _mm256_unpackhi_epi8(overlay, zero);
-                __m256i video_lo = _mm256_unpacklo_epi8(video, zero);
-                __m256i video_hi = _mm256_unpackhi_epi8(video, zero);
-                
-                // Extract and broadcast alpha values
-                __m256i alpha_bytes = _mm256_srli_epi32(overlay, 24);
-                __m256i alpha_lo = _mm256_unpacklo_epi16(alpha_bytes, alpha_bytes);
-                __m256i alpha_hi = _mm256_unpackhi_epi16(alpha_bytes, alpha_bytes);
-                alpha_lo = _mm256_unpacklo_epi16(alpha_lo, alpha_lo);
-                alpha_hi = _mm256_unpacklo_epi16(alpha_hi, alpha_hi);
-                
-                // Calculate inverse alpha
-                __m256i inv_alpha_lo = _mm256_sub_epi16(_mm256_set1_epi16(255), alpha_lo);
-                __m256i inv_alpha_hi = _mm256_sub_epi16(_mm256_set1_epi16(255), alpha_hi);
-                
-                // Blend with rounding
-                __m256i result_lo = _mm256_mullo_epi16(overlay_lo, alpha_lo);
-                result_lo = _mm256_add_epi16(result_lo, _mm256_mullo_epi16(video_lo, inv_alpha_lo));
-                result_lo = _mm256_add_epi16(result_lo, _mm256_set1_epi16(128));
-                result_lo = _mm256_mulhi_epu16(result_lo, _mm256_set1_epi16(0x8081));
-                
-                __m256i result_hi = _mm256_mullo_epi16(overlay_hi, alpha_hi);
-                result_hi = _mm256_add_epi16(result_hi, _mm256_mullo_epi16(video_hi, inv_alpha_hi));
-                result_hi = _mm256_add_epi16(result_hi, _mm256_set1_epi16(128));
-                result_hi = _mm256_mulhi_epu16(result_hi, _mm256_set1_epi16(0x8081));
-                
-                // Pack back to 8-bit
-                __m256i result = _mm256_packus_epi16(result_lo, result_hi);
-                
-                // Force alpha to 255
-                result = _mm256_or_si256(result, alpha_mask);
-                
-                // Store result
-                _mm256_storeu_si256((__m256i*)(rgba_line + x * 4), result);
-        }
-        
-        // Handle remaining pixels with SSE2 or scalar
-#ifdef __SSE2__
-        blend_line_sse2(rgba_line + x * 4, overlay_line + x * 4, width - x);
-#else
-        for (; x < width; x++) {
-                const unsigned char *overlay_pixel = overlay_line + x * 4;
-                unsigned char *rgba_pixel = rgba_line + x * 4;
-                
-                unsigned char r = overlay_pixel[0];
-                unsigned char g = overlay_pixel[1];
-                unsigned char b = overlay_pixel[2];
-                unsigned char a = overlay_pixel[3];
-                
-                rgba_pixel[0] = (r * a + rgba_pixel[0] * (255 - a)) / 255;
-                rgba_pixel[1] = (g * a + rgba_pixel[1] * (255 - a)) / 255;
-                rgba_pixel[2] = (b * a + rgba_pixel[2] * (255 - a)) / 255;
-                rgba_pixel[3] = 255;
-        }
-#endif
-}
-#endif
-
-#ifdef __ARM_NEON
-// ARM NEON alpha blending - simplified scalar implementation for now
-// TODO: Optimize with proper NEON vectorization
-static inline void blend_line_neon(unsigned char * __restrict rgba_line, 
-                                  const unsigned char * __restrict overlay_line,
-                                  int width)
-{
-        // For now, use scalar implementation to ensure correctness
-        // This will still be called when ARM NEON is available, allowing future optimization
-        for (int x = 0; x < width; x++) {
-                const unsigned char *overlay_pixel = overlay_line + x * 4;
-                unsigned char *rgba_pixel = rgba_line + x * 4;
-                
-                unsigned char r = overlay_pixel[0];
-                unsigned char g = overlay_pixel[1];
-                unsigned char b = overlay_pixel[2];
-                unsigned char a = overlay_pixel[3];
-                
-                rgba_pixel[0] = (r * a + rgba_pixel[0] * (255 - a)) / 255;
-                rgba_pixel[1] = (g * a + rgba_pixel[1] * (255 - a)) / 255;
-                rgba_pixel[2] = (b * a + rgba_pixel[2] * (255 - a)) / 255;
-                rgba_pixel[3] = 255;
-        }
-}
-#endif
 
 static bool overlay_postprocess(void *state, struct video_frame *in, struct video_frame *out, int req_pitch)
 {
@@ -926,75 +748,320 @@ skip_scaling:
                 blend_start = get_time_in_ns();
         }
         
+        // Check if we can do native format blending (before the loop)
+        bool used_native_blend = false;
+        if (out->color_spec == UYVY || out->color_spec == YUYV || out->color_spec == RGB || 
+            out->color_spec == v210 || out->color_spec == R10k || 
+            out->color_spec == R12L || out->color_spec == RGBA || out->color_spec == Y416) {
+                used_native_blend = true;
+        }
+        
         for (int y = 0; y < actual_overlay_height; ++y) {
-                
-                // Decode video line to RGBA
                 unsigned char *video_line = (unsigned char *)(out->tiles[0].data + 
                         (y + pos_y) * vc_get_linesize(out->tiles[0].width, out->color_spec) +
                         vc_get_linesize(pos_x, out->color_spec));
                 
-                long long decode_start = 0;
-                if (s->perf.enabled) {
-                        decode_start = get_time_in_ns();
-                }
-                
-                decoder(rgba_line, video_line, rgba_linesize, 0, 8, 16);
-                
-                if (s->perf.enabled) {
-                        s->perf.decode_time_ns += get_time_in_ns() - decode_start;
-                }
-                
-                // Blend overlay line
                 const unsigned char *overlay_line = overlay_to_use + y * overlay_stride_width * 4;
                 
-#ifdef __AVX2__
-                // Use AVX2 for fastest blending (processes 8 pixels at once)
-                blend_line_avx2(rgba_line, overlay_line, actual_overlay_width);
-#elif defined(__SSE2__)
-                // Use SSE2 for faster blending (processes 4 pixels at once)
-                blend_line_sse2(rgba_line, overlay_line, actual_overlay_width);
-#elif defined(__ARM_NEON)
-                // Use ARM NEON for faster blending (processes 4 pixels at once)
-                blend_line_neon(rgba_line, overlay_line, actual_overlay_width);
-#else
-                // Fallback to scalar blending
-                unsigned char *rgba_pixel = rgba_line;
-                
-                for (int x = 0; x < actual_overlay_width; ++x) {
+                // Check if we can do native format blending
+                if (out->color_spec == UYVY) {
+                        // Native UYVY blending
+                        // First extract alpha channel from RGBA overlay
+                        unsigned char *alpha_line = malloc(actual_overlay_width);
+                        if (!alpha_line) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate alpha buffer\n");
+                                continue;
+                        }
                         
-                        // Get RGBA values from overlay
-                        unsigned char r = overlay_line[0];
-                        unsigned char g = overlay_line[1];
-                        unsigned char b = overlay_line[2];
-                        unsigned char a = overlay_line[3];
+                        // Extract alpha channel
+                        for (int x = 0; x < actual_overlay_width; x++) {
+                                alpha_line[x] = overlay_line[x * 4 + 3];
+                        }
                         
-                        // Alpha blend: out = overlay * alpha + video * (1 - alpha)
-                        rgba_pixel[0] = (r * a + rgba_pixel[0] * (255 - a)) / 255;
-                        rgba_pixel[1] = (g * a + rgba_pixel[1] * (255 - a)) / 255;
-                        rgba_pixel[2] = (b * a + rgba_pixel[2] * (255 - a)) / 255;
-                        rgba_pixel[3] = 255;  // Keep output fully opaque
+                        // Convert overlay from RGBA to UYVY
+                        size_t uyvy_linesize = vc_get_linesize(actual_overlay_width, UYVY);
+                        unsigned char *overlay_uyvy = malloc(uyvy_linesize);
+                        if (!overlay_uyvy) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate UYVY buffer\n");
+                                free(alpha_line);
+                                continue;
+                        }
                         
-                        overlay_line += 4;  // Move to next RGBA pixel
-                        rgba_pixel += 4;    // Move to next RGBA pixel
-                }
-#endif
-                
-                // Encode back to video format
-                long long encode_start = 0;
-                if (s->perf.enabled) {
-                        encode_start = get_time_in_ns();
-                }
-                
-                coder(video_line, rgba_line, 
-                      vc_get_linesize(actual_overlay_width, out->color_spec), 0, 8, 16);
-                
-                if (s->perf.enabled) {
-                        s->perf.encode_time_ns += get_time_in_ns() - encode_start;
+                        // Get converter from RGBA to UYVY
+                        decoder_t rgba_to_uyvy = get_decoder_from_to(RGBA, UYVY);
+                        if (rgba_to_uyvy) {
+                                rgba_to_uyvy(overlay_uyvy, overlay_line, uyvy_linesize, 0, 8, 16);
+                        } else {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "No RGBA to UYVY converter available\n");
+                                free(overlay_uyvy);
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Do native UYVY blending
+                        alpha_blend_uyvy(video_line, overlay_uyvy, alpha_line, actual_overlay_width);
+                        
+                        free(overlay_uyvy);
+                        free(alpha_line);
+                        
+                } else if (out->color_spec == YUYV) {
+                        // Native YUYV blending
+                        // First extract alpha channel from RGBA overlay
+                        unsigned char *alpha_line = malloc(actual_overlay_width);
+                        if (!alpha_line) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate alpha buffer\n");
+                                continue;
+                        }
+                        
+                        // Extract alpha channel
+                        for (int x = 0; x < actual_overlay_width; x++) {
+                                alpha_line[x] = overlay_line[x * 4 + 3];
+                        }
+                        
+                        // Convert overlay from RGBA to YUYV
+                        size_t yuyv_linesize = vc_get_linesize(actual_overlay_width, YUYV);
+                        unsigned char *overlay_yuyv = malloc(yuyv_linesize);
+                        if (!overlay_yuyv) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate YUYV buffer\n");
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Get converter from RGBA to YUYV
+                        decoder_t rgba_to_yuyv = get_decoder_from_to(RGBA, YUYV);
+                        if (rgba_to_yuyv) {
+                                rgba_to_yuyv(overlay_yuyv, overlay_line, yuyv_linesize, 0, 8, 16);
+                        } else {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "No RGBA to YUYV converter available\n");
+                                free(overlay_yuyv);
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Do native YUYV blending
+                        alpha_blend_yuyv(video_line, overlay_yuyv, alpha_line, actual_overlay_width);
+                        
+                        free(overlay_yuyv);
+                        free(alpha_line);
+                        
+                } else if (out->color_spec == RGB) {
+                        // Native RGB blending
+                        // Extract alpha channel
+                        unsigned char *alpha_line = malloc(actual_overlay_width);
+                        if (!alpha_line) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate alpha buffer\n");
+                                continue;
+                        }
+                        
+                        for (int x = 0; x < actual_overlay_width; x++) {
+                                alpha_line[x] = overlay_line[x * 4 + 3];
+                        }
+                        
+                        // Convert overlay from RGBA to RGB
+                        size_t rgb_linesize = actual_overlay_width * 3;
+                        unsigned char *overlay_rgb = malloc(rgb_linesize);
+                        if (!overlay_rgb) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate RGB buffer\n");
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Get converter from RGBA to RGB
+                        decoder_t rgba_to_rgb = get_decoder_from_to(RGBA, RGB);
+                        if (rgba_to_rgb) {
+                                rgba_to_rgb(overlay_rgb, overlay_line, rgb_linesize, 0, 8, 16);
+                        } else {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "No RGBA to RGB converter available\n");
+                                free(overlay_rgb);
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Do native RGB blending
+                        alpha_blend_rgb(video_line, overlay_rgb, alpha_line, actual_overlay_width);
+                        
+                        free(overlay_rgb);
+                        free(alpha_line);
+                        
+                } else if (out->color_spec == v210) {
+                        // Native v210 blending
+                        unsigned char *alpha_line = malloc(actual_overlay_width);
+                        if (!alpha_line) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate alpha buffer\n");
+                                continue;
+                        }
+                        
+                        for (int x = 0; x < actual_overlay_width; x++) {
+                                alpha_line[x] = overlay_line[x * 4 + 3];
+                        }
+                        
+                        // Convert overlay from RGBA to v210
+                        size_t v210_linesize = vc_get_linesize(actual_overlay_width, v210);
+                        unsigned char *overlay_v210 = malloc(v210_linesize);
+                        if (!overlay_v210) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate v210 buffer\n");
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Get converter from RGBA to v210
+                        decoder_t rgba_to_v210 = get_decoder_from_to(RGBA, v210);
+                        if (rgba_to_v210) {
+                                rgba_to_v210(overlay_v210, overlay_line, v210_linesize, 0, 8, 16);
+                        } else {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "No RGBA to v210 converter available\n");
+                                free(overlay_v210);
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Do native v210 blending
+                        alpha_blend_v210(video_line, overlay_v210, alpha_line, actual_overlay_width);
+                        
+                        free(overlay_v210);
+                        free(alpha_line);
+                        
+                } else if (out->color_spec == R10k) {
+                        // Native R10k blending
+                        unsigned char *alpha_line = malloc(actual_overlay_width);
+                        if (!alpha_line) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate alpha buffer\n");
+                                continue;
+                        }
+                        
+                        for (int x = 0; x < actual_overlay_width; x++) {
+                                alpha_line[x] = overlay_line[x * 4 + 3];
+                        }
+                        
+                        // Convert overlay from RGBA to R10k
+                        size_t r10k_linesize = vc_get_linesize(actual_overlay_width, R10k);
+                        unsigned char *overlay_r10k = malloc(r10k_linesize);
+                        if (!overlay_r10k) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate R10k buffer\n");
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Get converter from RGBA to R10k
+                        decoder_t rgba_to_r10k = get_decoder_from_to(RGBA, R10k);
+                        if (rgba_to_r10k) {
+                                rgba_to_r10k(overlay_r10k, overlay_line, r10k_linesize, 0, 8, 16);
+                        } else {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "No RGBA to R10k converter available\n");
+                                free(overlay_r10k);
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Do native R10k blending
+                        alpha_blend_r10k(video_line, overlay_r10k, alpha_line, actual_overlay_width);
+                        
+                        free(overlay_r10k);
+                        free(alpha_line);
+                        
+                } else if (out->color_spec == R12L) {
+                        // Native R12L blending
+                        unsigned char *alpha_line = malloc(actual_overlay_width);
+                        if (!alpha_line) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate alpha buffer\n");
+                                continue;
+                        }
+                        
+                        for (int x = 0; x < actual_overlay_width; x++) {
+                                alpha_line[x] = overlay_line[x * 4 + 3];
+                        }
+                        
+                        // Convert overlay from RGBA to R12L
+                        size_t r12l_linesize = vc_get_linesize(actual_overlay_width, R12L);
+                        unsigned char *overlay_r12l = malloc(r12l_linesize);
+                        if (!overlay_r12l) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate R12L buffer\n");
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Get converter from RGBA to R12L
+                        decoder_t rgba_to_r12l = get_decoder_from_to(RGBA, R12L);
+                        if (rgba_to_r12l) {
+                                rgba_to_r12l(overlay_r12l, overlay_line, r12l_linesize, 0, 8, 16);
+                        } else {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "No RGBA to R12L converter available\n");
+                                free(overlay_r12l);
+                                free(alpha_line);
+                                continue;
+                        }
+                        
+                        // Do native R12L blending
+                        alpha_blend_r12l(video_line, overlay_r12l, alpha_line, actual_overlay_width);
+                        
+                        free(overlay_r12l);
+                        free(alpha_line);
+                        
+                } else if (out->color_spec == RGBA) {
+                        // Direct RGBA blending - no conversion needed
+                        alpha_blend_rgba(video_line, overlay_line, actual_overlay_width);
+                        
+                } else if (out->color_spec == Y416) {
+                        // Native Y416 blending - Y416 has its own alpha channel
+                        // Convert overlay from RGBA to Y416
+                        size_t y416_linesize = vc_get_linesize(actual_overlay_width, Y416);
+                        unsigned char *overlay_y416 = malloc(y416_linesize);
+                        if (!overlay_y416) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate Y416 buffer\n");
+                                continue;
+                        }
+                        
+                        // Get converter from RGBA to Y416
+                        decoder_t rgba_to_y416 = get_decoder_from_to(RGBA, Y416);
+                        if (rgba_to_y416) {
+                                rgba_to_y416(overlay_y416, overlay_line, y416_linesize, 0, 8, 16);
+                        } else {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "No RGBA to Y416 converter available\n");
+                                free(overlay_y416);
+                                continue;
+                        }
+                        
+                        // Do native Y416 blending (Y416 contains alpha in the format)
+                        alpha_blend_y416(video_line, overlay_y416, actual_overlay_width);
+                        
+                        free(overlay_y416);
+                        
+                } else {
+                        // Fallback: Convert to RGBA, blend, convert back
+                        long long decode_start = 0;
+                        if (s->perf.enabled) {
+                                decode_start = get_time_in_ns();
+                        }
+                        
+                        decoder(rgba_line, video_line, rgba_linesize, 0, 8, 16);
+                        
+                        if (s->perf.enabled) {
+                                s->perf.decode_time_ns += get_time_in_ns() - decode_start;
+                        }
+                        
+                        // Use optimized alpha blending from utils
+                        alpha_blend_rgba(rgba_line, overlay_line, actual_overlay_width);
+                        
+                        // Encode back to video format
+                        long long encode_start = 0;
+                        if (s->perf.enabled) {
+                                encode_start = get_time_in_ns();
+                        }
+                        
+                        coder(video_line, rgba_line, 
+                              vc_get_linesize(actual_overlay_width, out->color_spec), 0, 8, 16);
+                        
+                        if (s->perf.enabled) {
+                                s->perf.encode_time_ns += get_time_in_ns() - encode_start;
+                        }
                 }
         }
         
         if (s->perf.enabled) {
                 s->perf.blend_time_ns += get_time_in_ns() - blend_start;
+                if (used_native_blend) {
+                        s->perf.native_blend_count++;
+                }
         }
         
         free(rgba_line);
@@ -1032,8 +1099,8 @@ skip_scaling:
                                 avg_scale_ms, s->perf.scale_operations, scale_pct);
                         log_msg(LOG_LEVEL_INFO, MOD_NAME "  Decode: %.3f ms/frame (%.1f%%)\n", 
                                 avg_decode_ms, decode_pct);
-                        log_msg(LOG_LEVEL_INFO, MOD_NAME "  Blend:  %.3f ms/frame (%.1f%%)\n", 
-                                avg_blend_ms, blend_pct);
+                        log_msg(LOG_LEVEL_INFO, MOD_NAME "  Blend:  %.3f ms/frame (%.1f%%, %ld/%ld native)\n", 
+                                avg_blend_ms, blend_pct, s->perf.native_blend_count, s->perf.frame_count);
                         log_msg(LOG_LEVEL_INFO, MOD_NAME "  Encode: %.3f ms/frame (%.1f%%)\n", 
                                 avg_encode_ms, encode_pct);
                         
