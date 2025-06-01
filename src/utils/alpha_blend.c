@@ -301,9 +301,9 @@ void alpha_blend_rgba(uint8_t *dst, const uint8_t *src, int width)
 }
 
 /**
- * Native UYVY alpha blending
+ * Scalar implementation of UYVY alpha blending
  */
-void alpha_blend_uyvy(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+static void alpha_blend_uyvy_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         // UYVY format: U0 Y0 V0 Y1 (covers 2 pixels)
         for (int x = 0; x < width; x += 2) {
@@ -334,6 +334,378 @@ void alpha_blend_uyvy(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 dst += 4;
                 src += 4;
         }
+}
+
+#ifdef __SSE2__
+/**
+ * SSE2 optimized UYVY alpha blending - processes 8 pixels at once
+ */
+static void alpha_blend_uyvy_sse2(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        const __m128i zero = _mm_setzero_si128();
+        const __m128i c255 = _mm_set1_epi16(255);
+        const __m128i round = _mm_set1_epi16(128);
+        const __m128i div255 = _mm_set1_epi16(0x8081);
+        
+        int x = 0;
+        
+        // Process 8 pixels at a time (16 bytes = 4 UYVY groups)
+        for (; x <= width - 8; x += 8) {
+                // Load 16 bytes (8 pixels) of UYVY data
+                __m128i vdst = _mm_loadu_si128((const __m128i*)(dst + x * 2));
+                __m128i vsrc = _mm_loadu_si128((const __m128i*)(src + x * 2));
+                
+                // Load 8 alpha values
+                __m128i valpha = _mm_loadl_epi64((const __m128i*)(alpha + x));
+                valpha = _mm_unpacklo_epi8(valpha, zero);
+                
+                // Extract Y components (positions 1,3,5,7,9,11,13,15)
+                __m128i y_mask = _mm_set_epi8(0,15,0,13,0,11,0,9,0,7,0,5,0,3,0,1);
+                __m128i y_vid = _mm_shuffle_epi8(vdst, y_mask);
+                __m128i y_ovr = _mm_shuffle_epi8(vsrc, y_mask);
+                
+                // Extract U components (positions 0,4,8,12)
+                __m128i u_mask = _mm_set_epi8(0,0,0,0,0,0,0,0,0,12,0,8,0,4,0,0);
+                __m128i u_vid = _mm_shuffle_epi8(vdst, u_mask);
+                __m128i u_ovr = _mm_shuffle_epi8(vsrc, u_mask);
+                
+                // Extract V components (positions 2,6,10,14)
+                __m128i v_mask = _mm_set_epi8(0,0,0,0,0,0,0,0,0,14,0,10,0,6,0,2);
+                __m128i v_vid = _mm_shuffle_epi8(vdst, v_mask);
+                __m128i v_ovr = _mm_shuffle_epi8(vsrc, v_mask);
+                
+                // Expand alpha values to match Y positions (duplicate each alpha for two Y values)
+                __m128i alpha_y = _mm_unpacklo_epi16(valpha, valpha);
+                __m128i inv_alpha_y = _mm_sub_epi16(c255, alpha_y);
+                
+                // Blend Y components
+                y_vid = _mm_unpacklo_epi8(y_vid, zero);
+                y_ovr = _mm_unpacklo_epi8(y_ovr, zero);
+                __m128i y_result = _mm_mullo_epi16(y_ovr, alpha_y);
+                y_result = _mm_add_epi16(y_result, _mm_mullo_epi16(y_vid, inv_alpha_y));
+                y_result = _mm_add_epi16(y_result, round);
+                y_result = _mm_mulhi_epu16(y_result, div255);
+                
+                // Calculate average alpha for U/V components (average pairs)
+                __m128i alpha_even = _mm_and_si128(valpha, _mm_set_epi16(0,0xFF,0,0xFF,0,0xFF,0,0xFF));
+                __m128i alpha_odd = _mm_srli_epi16(valpha, 8);
+                __m128i alpha_avg = _mm_avg_epu16(alpha_even, alpha_odd);
+                alpha_avg = _mm_shufflelo_epi16(alpha_avg, 0xD8); // 0,2,1,3
+                alpha_avg = _mm_shufflehi_epi16(alpha_avg, 0xD8);
+                alpha_avg = _mm_packs_epi32(alpha_avg, alpha_avg);
+                __m128i inv_alpha_avg = _mm_sub_epi16(c255, alpha_avg);
+                
+                // Blend U components
+                u_vid = _mm_unpacklo_epi8(u_vid, zero);
+                u_ovr = _mm_unpacklo_epi8(u_ovr, zero);
+                __m128i u_result = _mm_mullo_epi16(u_ovr, alpha_avg);
+                u_result = _mm_add_epi16(u_result, _mm_mullo_epi16(u_vid, inv_alpha_avg));
+                u_result = _mm_add_epi16(u_result, round);
+                u_result = _mm_mulhi_epu16(u_result, div255);
+                
+                // Blend V components
+                v_vid = _mm_unpacklo_epi8(v_vid, zero);
+                v_ovr = _mm_unpacklo_epi8(v_ovr, zero);
+                __m128i v_result = _mm_mullo_epi16(v_ovr, alpha_avg);
+                v_result = _mm_add_epi16(v_result, _mm_mullo_epi16(v_vid, inv_alpha_avg));
+                v_result = _mm_add_epi16(v_result, round);
+                v_result = _mm_mulhi_epu16(v_result, div255);
+                
+                // Pack results back to 8-bit
+                y_result = _mm_packus_epi16(y_result, zero);
+                u_result = _mm_packus_epi16(u_result, zero);
+                v_result = _mm_packus_epi16(v_result, zero);
+                
+                // Reconstruct UYVY data
+                // First merge U and Y0 (U in even positions, Y in odd)
+                __m128i uy = _mm_unpacklo_epi8(u_result, y_result);
+                
+                // Then merge V and Y1 (we need to extract odd Y values)
+                __m128i y_odd = _mm_srli_epi16(y_result, 8);
+                __m128i vy = _mm_unpacklo_epi8(v_result, y_odd);
+                
+                // Final UYVY is interleaved UY and VY pairs
+                __m128i result_lo = _mm_unpacklo_epi16(uy, vy);
+                __m128i result_hi = _mm_unpackhi_epi16(uy, vy);
+                
+                // Store results
+                _mm_storeu_si128((__m128i*)(dst + x * 2), result_lo);
+                if (x + 4 < width) {
+                        _mm_storel_epi64((__m128i*)(dst + (x + 4) * 2), result_hi);
+                }
+        }
+        
+        // Handle remaining pixels with scalar code
+        alpha_blend_uyvy_scalar(dst + x * 2, src + x * 2, alpha + x, width - x);
+}
+#endif
+
+#ifdef __AVX2__
+/**
+ * AVX2 optimized UYVY alpha blending - processes 16 pixels at once
+ */
+static void alpha_blend_uyvy_avx2(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        const __m256i zero = _mm256_setzero_si256();
+        const __m256i c255 = _mm256_set1_epi16(255);
+        const __m256i round = _mm256_set1_epi16(128);
+        const __m256i div255 = _mm256_set1_epi16(0x8081);
+        
+        int x = 0;
+        
+        // Process 16 pixels at a time (32 bytes = 8 UYVY groups)
+        for (; x <= width - 16; x += 16) {
+                // Load 32 bytes (16 pixels) of UYVY data
+                __m256i vdst = _mm256_loadu_si256((const __m256i*)(dst + x * 2));
+                __m256i vsrc = _mm256_loadu_si256((const __m256i*)(src + x * 2));
+                
+                // Load 16 alpha values
+                __m128i alpha128 = _mm_loadu_si128((const __m128i*)(alpha + x));
+                __m256i valpha = _mm256_cvtepu8_epi16(alpha128);
+                
+                // Extract Y components using shuffle
+                __m256i y_indices = _mm256_set_epi8(
+                    31,29,27,25,23,21,19,17,15,13,11,9,7,5,3,1,
+                    31,29,27,25,23,21,19,17,15,13,11,9,7,5,3,1);
+                __m256i y_vid_packed = _mm256_shuffle_epi8(vdst, y_indices);
+                __m256i y_ovr_packed = _mm256_shuffle_epi8(vsrc, y_indices);
+                
+                // Combine Y values from both lanes
+                __m128i y_vid_lo = _mm256_extracti128_si256(y_vid_packed, 0);
+                __m128i y_vid_hi = _mm256_extracti128_si256(y_vid_packed, 1);
+                __m128i y_vid_bytes = _mm_unpacklo_epi64(y_vid_lo, y_vid_hi);
+                __m256i y_vid = _mm256_cvtepu8_epi16(y_vid_bytes);
+                
+                __m128i y_ovr_lo = _mm256_extracti128_si256(y_ovr_packed, 0);
+                __m128i y_ovr_hi = _mm256_extracti128_si256(y_ovr_packed, 1);
+                __m128i y_ovr_bytes = _mm_unpacklo_epi64(y_ovr_lo, y_ovr_hi);
+                __m256i y_ovr = _mm256_cvtepu8_epi16(y_ovr_bytes);
+                
+                // Calculate inverse alpha for Y
+                __m256i inv_alpha_y = _mm256_sub_epi16(c255, valpha);
+                
+                // Blend Y components
+                __m256i y_result = _mm256_mullo_epi16(y_ovr, valpha);
+                y_result = _mm256_add_epi16(y_result, _mm256_mullo_epi16(y_vid, inv_alpha_y));
+                y_result = _mm256_add_epi16(y_result, round);
+                y_result = _mm256_mulhi_epu16(y_result, div255);
+                
+                // Extract U and V components - they're at positions 0,4,8,12... and 2,6,10,14...
+                __m256i uv_indices_u = _mm256_set_epi8(
+                    -1,-1,-1,-1,-1,-1,-1,-1,28,24,20,16,12,8,4,0,
+                    -1,-1,-1,-1,-1,-1,-1,-1,28,24,20,16,12,8,4,0);
+                __m256i uv_indices_v = _mm256_set_epi8(
+                    -1,-1,-1,-1,-1,-1,-1,-1,30,26,22,18,14,10,6,2,
+                    -1,-1,-1,-1,-1,-1,-1,-1,30,26,22,18,14,10,6,2);
+                
+                __m256i u_vid_packed = _mm256_shuffle_epi8(vdst, uv_indices_u);
+                __m256i u_ovr_packed = _mm256_shuffle_epi8(vsrc, uv_indices_u);
+                __m256i v_vid_packed = _mm256_shuffle_epi8(vdst, uv_indices_v);
+                __m256i v_ovr_packed = _mm256_shuffle_epi8(vsrc, uv_indices_v);
+                
+                // Combine U/V values from both lanes
+                __m128i u_vid_bytes = _mm_unpacklo_epi64(
+                    _mm256_extracti128_si256(u_vid_packed, 0),
+                    _mm256_extracti128_si256(u_vid_packed, 1));
+                __m128i u_ovr_bytes = _mm_unpacklo_epi64(
+                    _mm256_extracti128_si256(u_ovr_packed, 0),
+                    _mm256_extracti128_si256(u_ovr_packed, 1));
+                __m128i v_vid_bytes = _mm_unpacklo_epi64(
+                    _mm256_extracti128_si256(v_vid_packed, 0),
+                    _mm256_extracti128_si256(v_vid_packed, 1));
+                __m128i v_ovr_bytes = _mm_unpacklo_epi64(
+                    _mm256_extracti128_si256(v_ovr_packed, 0),
+                    _mm256_extracti128_si256(v_ovr_packed, 1));
+                
+                // Convert to 16-bit for processing
+                __m256i u_vid = _mm256_cvtepu8_epi16(u_vid_bytes);
+                __m256i u_ovr = _mm256_cvtepu8_epi16(u_ovr_bytes);
+                __m256i v_vid = _mm256_cvtepu8_epi16(v_vid_bytes);
+                __m256i v_ovr = _mm256_cvtepu8_epi16(v_ovr_bytes);
+                
+                // Calculate average alpha for U/V (average adjacent pairs)
+                __m256i alpha_even = _mm256_and_si256(valpha, _mm256_set_epi16(0,0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF));
+                __m256i alpha_odd = _mm256_srli_epi16(valpha, 8);
+                __m256i alpha_avg = _mm256_avg_epu16(alpha_even, alpha_odd);
+                // Compress to get one alpha per U/V pair
+                alpha_avg = _mm256_permute4x64_epi64(alpha_avg, 0xD8);
+                alpha_avg = _mm256_shuffle_epi8(alpha_avg, 
+                    _mm256_set_epi8(
+                        -1,-1,-1,-1,-1,-1,-1,-1,14,14,10,10,6,6,2,2,
+                        -1,-1,-1,-1,-1,-1,-1,-1,14,14,10,10,6,6,2,2));
+                __m256i inv_alpha_avg = _mm256_sub_epi16(c255, alpha_avg);
+                
+                // Blend U components
+                __m256i u_result = _mm256_mullo_epi16(u_ovr, alpha_avg);
+                u_result = _mm256_add_epi16(u_result, _mm256_mullo_epi16(u_vid, inv_alpha_avg));
+                u_result = _mm256_add_epi16(u_result, round);
+                u_result = _mm256_mulhi_epu16(u_result, div255);
+                
+                // Blend V components
+                __m256i v_result = _mm256_mullo_epi16(v_ovr, alpha_avg);
+                v_result = _mm256_add_epi16(v_result, _mm256_mullo_epi16(v_vid, inv_alpha_avg));
+                v_result = _mm256_add_epi16(v_result, round);
+                v_result = _mm256_mulhi_epu16(v_result, div255);
+                
+                // Pack results back to 8-bit and reconstruct UYVY
+                __m128i y_result_packed = _mm256_cvtepi16_epi8(y_result);
+                __m128i u_result_packed = _mm256_cvtepi16_epi8(u_result);
+                __m128i v_result_packed = _mm256_cvtepi16_epi8(v_result);
+                
+                // Interleave to create UYVY format
+                __m256i result = _mm256_setzero_si256();
+                
+                // Place U values at positions 0,4,8,12...
+                for (int i = 0; i < 8; i++) {
+                        ((uint8_t*)&result)[i*4] = ((uint8_t*)&u_result_packed)[i];
+                        ((uint8_t*)&result)[i*4+1] = ((uint8_t*)&y_result_packed)[i*2];
+                        ((uint8_t*)&result)[i*4+2] = ((uint8_t*)&v_result_packed)[i];
+                        ((uint8_t*)&result)[i*4+3] = ((uint8_t*)&y_result_packed)[i*2+1];
+                }
+                
+                _mm256_storeu_si256((__m256i*)(dst + x * 2), result);
+        }
+        
+        // Handle remaining pixels
+#ifdef __SSE2__
+        alpha_blend_uyvy_sse2(dst + x * 2, src + x * 2, alpha + x, width - x);
+#else
+        alpha_blend_uyvy_scalar(dst + x * 2, src + x * 2, alpha + x, width - x);
+#endif
+}
+#endif
+
+#ifdef __ARM_NEON
+/**
+ * ARM NEON optimized UYVY alpha blending
+ */
+static void alpha_blend_uyvy_neon(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        int x = 0;
+        
+        // Process 8 pixels at a time (16 bytes = 4 UYVY groups)
+        for (; x <= width - 8; x += 8) {
+                // Load 16 bytes (8 pixels) of UYVY data
+                uint8x16_t vdst = vld1q_u8(dst + x * 2);
+                uint8x16_t vsrc = vld1q_u8(src + x * 2);
+                
+                // Load 8 alpha values
+                uint8x8_t alpha8 = vld1_u8(alpha + x);
+                uint16x8_t valpha = vmovl_u8(alpha8);
+                
+                // Extract Y components (at positions 1,3,5,7,9,11,13,15)
+                uint8x8_t y_indices = {1,3,5,7,9,11,13,15};
+                uint8x8_t y_vid = vqtbl1_u8(vdst, y_indices);
+                uint8x8_t y_ovr = vqtbl1_u8(vsrc, y_indices);
+                
+                // Extract U components (at positions 0,4,8,12)
+                uint8x8_t u_indices = {0,4,8,12,0,0,0,0};
+                uint8x8_t u_vid_temp = vqtbl1_u8(vdst, u_indices);
+                uint8x8_t u_ovr_temp = vqtbl1_u8(vsrc, u_indices);
+                
+                // Extract V components (at positions 2,6,10,14)
+                uint8x8_t v_indices = {2,6,10,14,0,0,0,0};
+                uint8x8_t v_vid_temp = vqtbl1_u8(vdst, v_indices);
+                uint8x8_t v_ovr_temp = vqtbl1_u8(vsrc, v_indices);
+                
+                // Convert to 16-bit for blending
+                uint16x8_t y_vid16 = vmovl_u8(y_vid);
+                uint16x8_t y_ovr16 = vmovl_u8(y_ovr);
+                uint16x8_t inv_alpha = vsubq_u16(vdupq_n_u16(255), valpha);
+                
+                // Blend Y components using simple division by 255
+                uint16x8_t y_temp = vmulq_u16(y_ovr16, valpha);
+                y_temp = vmlaq_u16(y_temp, y_vid16, inv_alpha);
+                
+                // Simple division by 255: (x + (x >> 8)) >> 8
+                uint16x8_t y_div = vaddq_u16(y_temp, vshrq_n_u16(y_temp, 8));
+                uint16x8_t y_result = vshrq_n_u16(y_div, 8);
+                
+                // Calculate average alpha for U/V components (pairs of pixels)
+                // Extract even/odd alpha values and average them
+                uint16x4_t alpha_lo = vget_low_u16(valpha);
+                uint16x4_t alpha_hi = vget_high_u16(valpha);
+                // Get alpha for pixels 0,2,4,6
+                uint16x4_t alpha_even = {vget_lane_u16(alpha_lo, 0), vget_lane_u16(alpha_lo, 2),
+                                         vget_lane_u16(alpha_hi, 0), vget_lane_u16(alpha_hi, 2)};
+                // Get alpha for pixels 1,3,5,7
+                uint16x4_t alpha_odd = {vget_lane_u16(alpha_lo, 1), vget_lane_u16(alpha_lo, 3),
+                                        vget_lane_u16(alpha_hi, 1), vget_lane_u16(alpha_hi, 3)};
+                uint16x4_t alpha_avg = vhadd_u16(alpha_even, alpha_odd);
+                uint16x4_t inv_alpha_avg = vsub_u16(vdup_n_u16(255), alpha_avg);
+                
+                // Convert U/V to 16-bit (only first 4 values are valid)
+                uint16x8_t u_vid16 = vmovl_u8(u_vid_temp);
+                uint16x8_t u_ovr16 = vmovl_u8(u_ovr_temp);
+                uint16x8_t v_vid16 = vmovl_u8(v_vid_temp);
+                uint16x8_t v_ovr16 = vmovl_u8(v_ovr_temp);
+                
+                // Blend U components (only first 4)
+                uint16x4_t u_vid16_4 = vget_low_u16(u_vid16);
+                uint16x4_t u_ovr16_4 = vget_low_u16(u_ovr16);
+                uint16x4_t u_temp = vmul_u16(u_ovr16_4, alpha_avg);
+                u_temp = vmla_u16(u_temp, u_vid16_4, inv_alpha_avg);
+                
+                // Simple division by 255: (x + (x >> 8)) >> 8
+                uint16x4_t u_div = vadd_u16(u_temp, vshr_n_u16(u_temp, 8));
+                uint16x4_t u_result = vshr_n_u16(u_div, 8);
+                
+                // Blend V components (only first 4)
+                uint16x4_t v_vid16_4 = vget_low_u16(v_vid16);
+                uint16x4_t v_ovr16_4 = vget_low_u16(v_ovr16);
+                uint16x4_t v_temp = vmul_u16(v_ovr16_4, alpha_avg);
+                v_temp = vmla_u16(v_temp, v_vid16_4, inv_alpha_avg);
+                
+                // Simple division by 255: (x + (x >> 8)) >> 8
+                uint16x4_t v_div = vadd_u16(v_temp, vshr_n_u16(v_temp, 8));
+                uint16x4_t v_result = vshr_n_u16(v_div, 8);
+                
+                // Pack results back to 8-bit
+                uint8x8_t y_result8 = vqmovn_u16(y_result);
+                uint8x8_t u_result8 = vqmovn_u16(vcombine_u16(u_result, u_result));
+                uint8x8_t v_result8 = vqmovn_u16(vcombine_u16(v_result, v_result));
+                
+                // Reconstruct UYVY format by manually interleaving components
+                uint8_t temp[16];
+                temp[0] = vget_lane_u8(u_result8, 0);  // U0
+                temp[1] = vget_lane_u8(y_result8, 0);  // Y0
+                temp[2] = vget_lane_u8(v_result8, 0);  // V0
+                temp[3] = vget_lane_u8(y_result8, 1);  // Y1
+                temp[4] = vget_lane_u8(u_result8, 1);  // U1
+                temp[5] = vget_lane_u8(y_result8, 2);  // Y2
+                temp[6] = vget_lane_u8(v_result8, 1);  // V1
+                temp[7] = vget_lane_u8(y_result8, 3);  // Y3
+                temp[8] = vget_lane_u8(u_result8, 2);  // U2
+                temp[9] = vget_lane_u8(y_result8, 4);  // Y4
+                temp[10] = vget_lane_u8(v_result8, 2); // V2
+                temp[11] = vget_lane_u8(y_result8, 5); // Y5
+                temp[12] = vget_lane_u8(u_result8, 3); // U3
+                temp[13] = vget_lane_u8(y_result8, 6); // Y6
+                temp[14] = vget_lane_u8(v_result8, 3); // V3
+                temp[15] = vget_lane_u8(y_result8, 7); // Y7
+                
+                vst1q_u8(dst + x * 2, vld1q_u8(temp));
+        }
+        
+        // Handle remaining pixels with scalar code
+        alpha_blend_uyvy_scalar(dst + x * 2, src + x * 2, alpha + x, width - x);
+}
+#endif
+
+/**
+ * Native UYVY alpha blending
+ */
+void alpha_blend_uyvy(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+#ifdef __AVX2__
+        alpha_blend_uyvy_avx2(dst, src, alpha, width);
+#elif defined(__SSE2__)
+        alpha_blend_uyvy_sse2(dst, src, alpha, width);
+#elif defined(__ARM_NEON)
+        alpha_blend_uyvy_neon(dst, src, alpha, width);
+#else
+        alpha_blend_uyvy_scalar(dst, src, alpha, width);
+#endif
 }
 
 /**
