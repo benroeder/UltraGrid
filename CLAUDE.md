@@ -207,4 +207,3 @@ make test_alpha_blend
 - Added cross-platform nanosecond file monitoring
 - Created reusable alpha blending utilities
 - Performance: >2000 megapixels/second on modern hardware
-```

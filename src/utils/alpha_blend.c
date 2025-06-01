@@ -1232,7 +1232,10 @@ void alpha_blend_rgb(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int
  * Native v210 alpha blending (10-bit YUV 4:2:2)
  * v210 packs 6 pixels (12 samples) into 16 bytes
  */
-void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+/**
+ * Scalar v210 alpha blending
+ */
+static void alpha_blend_v210_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         // Process in groups of 6 pixels (16 bytes)
         for (int x = 0; x < width; x += 6) {
@@ -1252,9 +1255,10 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 uint16_t y0_src = (word0_src >> 10) & 0x3FF;
                 uint16_t cr0_src = (word0_src >> 20) & 0x3FF;
                 
-                // Blend Y0 with its alpha
+                // Blend Y0 with its alpha (scale alpha for 10-bit values)
                 uint8_t a0 = alpha[x];
-                y0_dst = (y0_src * a0 + y0_dst * (255 - a0)) / 255;
+                uint32_t temp = y0_src * a0 + y0_dst * (255 - a0);
+                y0_dst = (temp + (temp >> 8)) >> 8;
                 
                 // Word 1: Y1 Cb2 Y2 (each 10 bits + 2 padding)
                 uint32_t word1_dst = dst_words[1];
@@ -1271,8 +1275,10 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 // Blend Y1 and Y2
                 uint8_t a1 = (x + 1 < width) ? alpha[x + 1] : a0;
                 uint8_t a2 = (x + 2 < width) ? alpha[x + 2] : a1;
-                y1_dst = (y1_src * a1 + y1_dst * (255 - a1)) / 255;
-                y2_dst = (y2_src * a2 + y2_dst * (255 - a2)) / 255;
+                temp = y1_src * a1 + y1_dst * (255 - a1);
+                y1_dst = (temp + (temp >> 8)) >> 8;
+                temp = y2_src * a2 + y2_dst * (255 - a2);
+                y2_dst = (temp + (temp >> 8)) >> 8;
                 
                 // Word 2: Cr2 Y3 Cb4 (each 10 bits + 2 padding)
                 uint32_t word2_dst = dst_words[2];
@@ -1288,7 +1294,8 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 
                 // Blend Y3
                 uint8_t a3 = (x + 3 < width) ? alpha[x + 3] : a2;
-                y3_dst = (y3_src * a3 + y3_dst * (255 - a3)) / 255;
+                temp = y3_src * a3 + y3_dst * (255 - a3);
+                y3_dst = (temp + (temp >> 8)) >> 8;
                 
                 // Word 3: Y4 Cr4 Y5 (each 10 bits + 2 padding)
                 uint32_t word3_dst = dst_words[3];
@@ -1305,20 +1312,28 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 // Blend Y4 and Y5
                 uint8_t a4 = (x + 4 < width) ? alpha[x + 4] : a3;
                 uint8_t a5 = (x + 5 < width) ? alpha[x + 5] : a4;
-                y4_dst = (y4_src * a4 + y4_dst * (255 - a4)) / 255;
-                y5_dst = (y5_src * a5 + y5_dst * (255 - a5)) / 255;
+                temp = y4_src * a4 + y4_dst * (255 - a4);
+                y4_dst = (temp + (temp >> 8)) >> 8;
+                temp = y5_src * a5 + y5_dst * (255 - a5);
+                y5_dst = (temp + (temp >> 8)) >> 8;
                 
                 // Blend chroma using average alpha for pixel pairs
                 uint8_t avg_alpha_01 = (a0 + a1) / 2;
                 uint8_t avg_alpha_23 = (a2 + a3) / 2;
                 uint8_t avg_alpha_45 = (a4 + a5) / 2;
                 
-                cb0_dst = (cb0_src * avg_alpha_01 + cb0_dst * (255 - avg_alpha_01)) / 255;
-                cr0_dst = (cr0_src * avg_alpha_01 + cr0_dst * (255 - avg_alpha_01)) / 255;
-                cb2_dst = (cb2_src * avg_alpha_23 + cb2_dst * (255 - avg_alpha_23)) / 255;
-                cr2_dst = (cr2_src * avg_alpha_23 + cr2_dst * (255 - avg_alpha_23)) / 255;
-                cb4_dst = (cb4_src * avg_alpha_45 + cb4_dst * (255 - avg_alpha_45)) / 255;
-                cr4_dst = (cr4_src * avg_alpha_45 + cr4_dst * (255 - avg_alpha_45)) / 255;
+                temp = cb0_src * avg_alpha_01 + cb0_dst * (255 - avg_alpha_01);
+                cb0_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr0_src * avg_alpha_01 + cr0_dst * (255 - avg_alpha_01);
+                cr0_dst = (temp + (temp >> 8)) >> 8;
+                temp = cb2_src * avg_alpha_23 + cb2_dst * (255 - avg_alpha_23);
+                cb2_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr2_src * avg_alpha_23 + cr2_dst * (255 - avg_alpha_23);
+                cr2_dst = (temp + (temp >> 8)) >> 8;
+                temp = cb4_src * avg_alpha_45 + cb4_dst * (255 - avg_alpha_45);
+                cb4_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr4_src * avg_alpha_45 + cr4_dst * (255 - avg_alpha_45);
+                cr4_dst = (temp + (temp >> 8)) >> 8;
                 
                 // Pack back into v210 format
                 dst_words[0] = (cb0_dst & 0x3FF) | ((y0_dst & 0x3FF) << 10) | ((cr0_dst & 0x3FF) << 20);
@@ -1329,6 +1344,297 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 dst += 16;
                 src += 16;
         }
+}
+
+#ifdef __SSE2__
+/**
+ * SSE2 optimized v210 alpha blending
+ * 
+ * v210 packs 6 pixels (12 luma + 6 chroma) into 16 bytes as:
+ * Word 0: Cb0(10) Y0(10) Cr0(10) + 2 pad
+ * Word 1: Y1(10) Cb2(10) Y2(10) + 2 pad  
+ * Word 2: Cr2(10) Y3(10) Cb4(10) + 2 pad
+ * Word 3: Y4(10) Cr4(10) Y5(10) + 2 pad
+ */
+static void alpha_blend_v210_sse2(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        const __m128i mask_10bit = _mm_set1_epi32(0x3FF);
+        const __m128i c255_16 = _mm_set1_epi16(255);
+        
+        int x = 0;
+        
+        // Process 6 pixels at a time (16 bytes)
+        for (; x <= width - 6; x += 6) {
+                // Calculate byte offset for this group of 6 pixels
+                int byte_offset = (x / 6) * 16;
+                
+                // Load 4 32-bit words (16 bytes total)
+                __m128i words = _mm_loadu_si128((const __m128i*)(src + byte_offset));
+                __m128i dst_words = _mm_loadu_si128((const __m128i*)(dst + byte_offset));
+                
+                // Extract individual 32-bit words
+                uint32_t word0_src = _mm_extract_epi32(words, 0);
+                uint32_t word1_src = _mm_extract_epi32(words, 1);
+                uint32_t word2_src = _mm_extract_epi32(words, 2);
+                uint32_t word3_src = _mm_extract_epi32(words, 3);
+                
+                uint32_t word0_dst = _mm_extract_epi32(dst_words, 0);
+                uint32_t word1_dst = _mm_extract_epi32(dst_words, 1);
+                uint32_t word2_dst = _mm_extract_epi32(dst_words, 2);
+                uint32_t word3_dst = _mm_extract_epi32(dst_words, 3);
+                
+                // Extract all Y values
+                uint16_t y_src[6] = {
+                        (word0_src >> 10) & 0x3FF,  // Y0
+                        (word1_src >> 0) & 0x3FF,   // Y1
+                        (word1_src >> 20) & 0x3FF,  // Y2
+                        (word2_src >> 10) & 0x3FF,  // Y3
+                        (word3_src >> 0) & 0x3FF,   // Y4
+                        (word3_src >> 20) & 0x3FF   // Y5
+                };
+                
+                uint16_t y_dst[6] = {
+                        (word0_dst >> 10) & 0x3FF,
+                        (word1_dst >> 0) & 0x3FF,
+                        (word1_dst >> 20) & 0x3FF,
+                        (word2_dst >> 10) & 0x3FF,
+                        (word3_dst >> 0) & 0x3FF,
+                        (word3_dst >> 20) & 0x3FF
+                };
+                
+                // Load alpha values for 6 pixels
+                uint8_t alpha_vals[6];
+                for (int i = 0; i < 6; i++) {
+                        alpha_vals[i] = (x + i < width) ? alpha[x + i] : alpha[x];
+                }
+                
+                // Blend Y values using proper division
+                for (int i = 0; i < 6; i++) {
+                        uint32_t temp = y_src[i] * alpha_vals[i] + y_dst[i] * (255 - alpha_vals[i]);
+                        y_dst[i] = (temp + (temp >> 8)) >> 8;
+                }
+                
+                // Extract and blend chroma values
+                uint16_t cb0_src = (word0_src >> 0) & 0x3FF;
+                uint16_t cr0_src = (word0_src >> 20) & 0x3FF;
+                uint16_t cb2_src = (word1_src >> 10) & 0x3FF;
+                uint16_t cr2_src = (word2_src >> 0) & 0x3FF;
+                uint16_t cb4_src = (word2_src >> 20) & 0x3FF;
+                uint16_t cr4_src = (word3_src >> 10) & 0x3FF;
+                
+                uint16_t cb0_dst = (word0_dst >> 0) & 0x3FF;
+                uint16_t cr0_dst = (word0_dst >> 20) & 0x3FF;
+                uint16_t cb2_dst = (word1_dst >> 10) & 0x3FF;
+                uint16_t cr2_dst = (word2_dst >> 0) & 0x3FF;
+                uint16_t cb4_dst = (word2_dst >> 20) & 0x3FF;
+                uint16_t cr4_dst = (word3_dst >> 10) & 0x3FF;
+                
+                // Average alpha for chroma (4:2:2 subsampling)
+                uint8_t avg_alpha_01 = (alpha_vals[0] + alpha_vals[1]) / 2;
+                uint8_t avg_alpha_23 = (alpha_vals[2] + alpha_vals[3]) / 2;
+                uint8_t avg_alpha_45 = (alpha_vals[4] + alpha_vals[5]) / 2;
+                
+                // Blend chroma with proper division
+                uint32_t temp;
+                temp = cb0_src * avg_alpha_01 + cb0_dst * (255 - avg_alpha_01);
+                cb0_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr0_src * avg_alpha_01 + cr0_dst * (255 - avg_alpha_01);
+                cr0_dst = (temp + (temp >> 8)) >> 8;
+                
+                temp = cb2_src * avg_alpha_23 + cb2_dst * (255 - avg_alpha_23);
+                cb2_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr2_src * avg_alpha_23 + cr2_dst * (255 - avg_alpha_23);
+                cr2_dst = (temp + (temp >> 8)) >> 8;
+                
+                temp = cb4_src * avg_alpha_45 + cb4_dst * (255 - avg_alpha_45);
+                cb4_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr4_src * avg_alpha_45 + cr4_dst * (255 - avg_alpha_45);
+                cr4_dst = (temp + (temp >> 8)) >> 8;
+                
+                // Pack results back into v210 format
+                uint32_t result_words[4];
+                result_words[0] = (cb0_dst & 0x3FF) | ((y_dst[0] & 0x3FF) << 10) | ((cr0_dst & 0x3FF) << 20);
+                result_words[1] = (y_dst[1] & 0x3FF) | ((cb2_dst & 0x3FF) << 10) | ((y_dst[2] & 0x3FF) << 20);
+                result_words[2] = (cr2_dst & 0x3FF) | ((y_dst[3] & 0x3FF) << 10) | ((cb4_dst & 0x3FF) << 20);
+                result_words[3] = (y_dst[4] & 0x3FF) | ((cr4_dst & 0x3FF) << 10) | ((y_dst[5] & 0x3FF) << 20);
+                
+                // Store result
+                __m128i result = _mm_set_epi32(result_words[3], result_words[2], result_words[1], result_words[0]);
+                _mm_storeu_si128((__m128i*)(dst + byte_offset), result);
+        }
+        
+        // Handle remaining pixels with scalar fallback
+        if (x < width) {
+                int remaining_byte_offset = (x / 6) * 16;
+                alpha_blend_v210_scalar(dst + remaining_byte_offset, src + remaining_byte_offset, alpha + x, width - x);
+        }
+}
+#endif
+
+#ifdef __AVX2__
+/**
+ * AVX2 optimized v210 alpha blending - processes 12 pixels at once (32 bytes)
+ */
+static void alpha_blend_v210_avx2(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        int x = 0;
+        
+        // Use SSE2 for chunks of 6 pixels
+        for (; x <= width - 12; x += 12) {
+#ifdef __SSE2__
+                int byte_offset1 = (x / 6) * 16;
+                int byte_offset2 = ((x + 6) / 6) * 16;
+                alpha_blend_v210_sse2(dst + byte_offset1, src + byte_offset1, alpha + x, 6);
+                alpha_blend_v210_sse2(dst + byte_offset2, src + byte_offset2, alpha + x + 6, 6);
+#else
+                int byte_offset = (x / 6) * 16;
+                alpha_blend_v210_scalar(dst + byte_offset, src + byte_offset, alpha + x, 12);
+#endif
+        }
+        
+        // Handle remaining pixels
+        if (x < width) {
+#ifdef __SSE2__
+                int byte_offset = (x / 6) * 16;
+                alpha_blend_v210_sse2(dst + byte_offset, src + byte_offset, alpha + x, width - x);
+#else
+                int byte_offset = (x / 6) * 16;
+                alpha_blend_v210_scalar(dst + byte_offset, src + byte_offset, alpha + x, width - x);
+#endif
+        }
+}
+#endif
+
+#ifdef __ARM_NEON
+/**
+ * ARM NEON optimized v210 alpha blending
+ */
+static void alpha_blend_v210_neon(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        int x = 0;
+        
+        // Process 6 pixels at a time (16 bytes)
+        for (; x <= width - 6; x += 6) {
+                // Calculate byte offset for this group of 6 pixels
+                int byte_offset = (x / 6) * 16;
+                
+                // Load 16 bytes (4 words)
+                uint32x4_t words_src = vld1q_u32((const uint32_t*)(src + byte_offset));
+                uint32x4_t words_dst = vld1q_u32((const uint32_t*)(dst + byte_offset));
+                
+                // Extract individual words
+                uint32_t word0_src = vgetq_lane_u32(words_src, 0);
+                uint32_t word1_src = vgetq_lane_u32(words_src, 1);
+                uint32_t word2_src = vgetq_lane_u32(words_src, 2);
+                uint32_t word3_src = vgetq_lane_u32(words_src, 3);
+                
+                uint32_t word0_dst = vgetq_lane_u32(words_dst, 0);
+                uint32_t word1_dst = vgetq_lane_u32(words_dst, 1);
+                uint32_t word2_dst = vgetq_lane_u32(words_dst, 2);
+                uint32_t word3_dst = vgetq_lane_u32(words_dst, 3);
+                
+                // Extract Y values
+                uint16_t y_src[6] = {
+                        (word0_src >> 10) & 0x3FF,
+                        (word1_src >> 0) & 0x3FF,
+                        (word1_src >> 20) & 0x3FF,
+                        (word2_src >> 10) & 0x3FF,
+                        (word3_src >> 0) & 0x3FF,
+                        (word3_src >> 20) & 0x3FF
+                };
+                
+                uint16_t y_dst[6] = {
+                        (word0_dst >> 10) & 0x3FF,
+                        (word1_dst >> 0) & 0x3FF,
+                        (word1_dst >> 20) & 0x3FF,
+                        (word2_dst >> 10) & 0x3FF,
+                        (word3_dst >> 0) & 0x3FF,
+                        (word3_dst >> 20) & 0x3FF
+                };
+                
+                // Load alpha values
+                uint8_t alpha_vals[6];
+                for (int i = 0; i < 6; i++) {
+                        alpha_vals[i] = (x + i < width) ? alpha[x + i] : alpha[x];
+                }
+                
+                // Blend Y values using proper division
+                for (int i = 0; i < 6; i++) {
+                        uint32_t temp = y_src[i] * alpha_vals[i] + y_dst[i] * (255 - alpha_vals[i]);
+                        y_dst[i] = (temp + (temp >> 8)) >> 8;
+                }
+                
+                // Extract and blend chroma
+                uint16_t cb0_src = (word0_src >> 0) & 0x3FF;
+                uint16_t cr0_src = (word0_src >> 20) & 0x3FF;
+                uint16_t cb2_src = (word1_src >> 10) & 0x3FF;
+                uint16_t cr2_src = (word2_src >> 0) & 0x3FF;
+                uint16_t cb4_src = (word2_src >> 20) & 0x3FF;
+                uint16_t cr4_src = (word3_src >> 10) & 0x3FF;
+                
+                uint16_t cb0_dst = (word0_dst >> 0) & 0x3FF;
+                uint16_t cr0_dst = (word0_dst >> 20) & 0x3FF;
+                uint16_t cb2_dst = (word1_dst >> 10) & 0x3FF;
+                uint16_t cr2_dst = (word2_dst >> 0) & 0x3FF;
+                uint16_t cb4_dst = (word2_dst >> 20) & 0x3FF;
+                uint16_t cr4_dst = (word3_dst >> 10) & 0x3FF;
+                
+                // Average alpha for chroma
+                uint8_t avg_alpha_01 = (alpha_vals[0] + alpha_vals[1]) / 2;
+                uint8_t avg_alpha_23 = (alpha_vals[2] + alpha_vals[3]) / 2;
+                uint8_t avg_alpha_45 = (alpha_vals[4] + alpha_vals[5]) / 2;
+                
+                // Blend chroma
+                uint32_t temp;
+                temp = cb0_src * avg_alpha_01 + cb0_dst * (255 - avg_alpha_01);
+                cb0_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr0_src * avg_alpha_01 + cr0_dst * (255 - avg_alpha_01);
+                cr0_dst = (temp + (temp >> 8)) >> 8;
+                
+                temp = cb2_src * avg_alpha_23 + cb2_dst * (255 - avg_alpha_23);
+                cb2_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr2_src * avg_alpha_23 + cr2_dst * (255 - avg_alpha_23);
+                cr2_dst = (temp + (temp >> 8)) >> 8;
+                
+                temp = cb4_src * avg_alpha_45 + cb4_dst * (255 - avg_alpha_45);
+                cb4_dst = (temp + (temp >> 8)) >> 8;
+                temp = cr4_src * avg_alpha_45 + cr4_dst * (255 - avg_alpha_45);
+                cr4_dst = (temp + (temp >> 8)) >> 8;
+                
+                // Pack results back
+                uint32_t result_words[4];
+                result_words[0] = (cb0_dst & 0x3FF) | ((y_dst[0] & 0x3FF) << 10) | ((cr0_dst & 0x3FF) << 20);
+                result_words[1] = (y_dst[1] & 0x3FF) | ((cb2_dst & 0x3FF) << 10) | ((y_dst[2] & 0x3FF) << 20);
+                result_words[2] = (cr2_dst & 0x3FF) | ((y_dst[3] & 0x3FF) << 10) | ((cb4_dst & 0x3FF) << 20);
+                result_words[3] = (y_dst[4] & 0x3FF) | ((cr4_dst & 0x3FF) << 10) | ((y_dst[5] & 0x3FF) << 20);
+                
+                // Store result
+                uint32x4_t result = vld1q_u32(result_words);
+                vst1q_u32((uint32_t*)(dst + byte_offset), result);
+        }
+        
+        // Handle remaining pixels
+        if (x < width) {
+                int remaining_byte_offset = (x / 6) * 16;
+                alpha_blend_v210_scalar(dst + remaining_byte_offset, src + remaining_byte_offset, alpha + x, width - x);
+        }
+}
+#endif
+
+/**
+ * Native v210 alpha blending with SIMD optimization
+ */
+void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+#ifdef __AVX2__
+        alpha_blend_v210_avx2(dst, src, alpha, width);
+#elif defined(__SSE2__)
+        alpha_blend_v210_sse2(dst, src, alpha, width);
+#elif defined(__ARM_NEON)
+        alpha_blend_v210_neon(dst, src, alpha, width);
+#else
+        alpha_blend_v210_scalar(dst, src, alpha, width);
+#endif
 }
 
 /**

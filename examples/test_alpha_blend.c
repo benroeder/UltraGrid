@@ -70,6 +70,204 @@ static void test_uyvy_blending()
     printf("After blend  - dst: U=%d Y0=%d V=%d Y1=%d\n", dst[0], dst[1], dst[2], dst[3]);
 }
 
+// Forward declaration of scalar functions for benchmarking
+static void alpha_blend_rgba_scalar(uint8_t *dst, const uint8_t *src, int width);
+static void alpha_blend_uyvy_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
+static void alpha_blend_yuyv_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
+static void alpha_blend_rgb_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
+static void alpha_blend_v210_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
+
+// Scalar implementations for testing
+static void alpha_blend_rgba_scalar(uint8_t *dst, const uint8_t *src, int width)
+{
+    for (int x = 0; x < width; x++) {
+        uint8_t r = src[0];
+        uint8_t g = src[1];
+        uint8_t b = src[2];
+        uint8_t a = src[3];
+        
+        dst[0] = (r * a + dst[0] * (255 - a)) / 255;
+        dst[1] = (g * a + dst[1] * (255 - a)) / 255;
+        dst[2] = (b * a + dst[2] * (255 - a)) / 255;
+        dst[3] = 255;
+        
+        src += 4;
+        dst += 4;
+    }
+}
+
+static void alpha_blend_uyvy_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+    for (int x = 0; x < width; x += 2) {
+        uint8_t u_src = src[0];
+        uint8_t y0_src = src[1];
+        uint8_t v_src = src[2];
+        uint8_t y1_src = src[3];
+        
+        uint8_t u_dst = dst[0];
+        uint8_t y0_dst = dst[1];
+        uint8_t v_dst = dst[2];
+        uint8_t y1_dst = dst[3];
+        
+        uint8_t a0 = alpha[x];
+        uint8_t a1 = (x + 1 < width) ? alpha[x + 1] : a0;
+        uint8_t avg_alpha = (a0 + a1) / 2;
+        
+        dst[0] = (u_src * avg_alpha + u_dst * (255 - avg_alpha)) / 255;
+        dst[1] = (y0_src * a0 + y0_dst * (255 - a0)) / 255;
+        dst[2] = (v_src * avg_alpha + v_dst * (255 - avg_alpha)) / 255;
+        dst[3] = (y1_src * a1 + y1_dst * (255 - a1)) / 255;
+        
+        src += 4;
+        dst += 4;
+    }
+}
+
+static void alpha_blend_yuyv_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+    for (int x = 0; x < width; x += 2) {
+        uint8_t y0_src = src[0];
+        uint8_t u_src = src[1];
+        uint8_t y1_src = src[2];
+        uint8_t v_src = src[3];
+        
+        uint8_t y0_dst = dst[0];
+        uint8_t u_dst = dst[1];
+        uint8_t y1_dst = dst[2];
+        uint8_t v_dst = dst[3];
+        
+        uint8_t a0 = alpha[x];
+        uint8_t a1 = (x + 1 < width) ? alpha[x + 1] : a0;
+        uint8_t avg_alpha = (a0 + a1) / 2;
+        
+        dst[0] = (y0_src * a0 + y0_dst * (255 - a0)) / 255;
+        dst[1] = (u_src * avg_alpha + u_dst * (255 - avg_alpha)) / 255;
+        dst[2] = (y1_src * a1 + y1_dst * (255 - a1)) / 255;
+        dst[3] = (v_src * avg_alpha + v_dst * (255 - avg_alpha)) / 255;
+        
+        src += 4;
+        dst += 4;
+    }
+}
+
+static void alpha_blend_rgb_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+    for (int x = 0; x < width; x++) {
+        uint8_t a = alpha[x];
+        
+        dst[0] = (src[0] * a + dst[0] * (255 - a)) / 255;
+        dst[1] = (src[1] * a + dst[1] * (255 - a)) / 255;
+        dst[2] = (src[2] * a + dst[2] * (255 - a)) / 255;
+        
+        dst += 3;
+        src += 3;
+    }
+}
+
+static void alpha_blend_v210_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+    // Process in groups of 6 pixels (16 bytes)
+    for (int x = 0; x < width; x += 6) {
+        uint32_t *dst_words = (uint32_t *)dst;
+        const uint32_t *src_words = (const uint32_t *)src;
+        
+        // Extract 10-bit values from packed format
+        uint32_t word0_dst = dst_words[0];
+        uint32_t word0_src = src_words[0];
+        
+        uint16_t cb0_dst = (word0_dst >> 0) & 0x3FF;
+        uint16_t y0_dst = (word0_dst >> 10) & 0x3FF;
+        uint16_t cr0_dst = (word0_dst >> 20) & 0x3FF;
+        
+        uint16_t cb0_src = (word0_src >> 0) & 0x3FF;
+        uint16_t y0_src = (word0_src >> 10) & 0x3FF;
+        uint16_t cr0_src = (word0_src >> 20) & 0x3FF;
+        
+        uint8_t a0 = alpha[x];
+        uint32_t temp = y0_src * a0 + y0_dst * (255 - a0);
+        y0_dst = (temp + (temp >> 8)) >> 8;
+        
+        uint32_t word1_dst = dst_words[1];
+        uint32_t word1_src = src_words[1];
+        
+        uint16_t y1_dst = (word1_dst >> 0) & 0x3FF;
+        uint16_t cb2_dst = (word1_dst >> 10) & 0x3FF;
+        uint16_t y2_dst = (word1_dst >> 20) & 0x3FF;
+        
+        uint16_t y1_src = (word1_src >> 0) & 0x3FF;
+        uint16_t cb2_src = (word1_src >> 10) & 0x3FF;
+        uint16_t y2_src = (word1_src >> 20) & 0x3FF;
+        
+        uint8_t a1 = (x + 1 < width) ? alpha[x + 1] : a0;
+        uint8_t a2 = (x + 2 < width) ? alpha[x + 2] : a1;
+        temp = y1_src * a1 + y1_dst * (255 - a1);
+        y1_dst = (temp + (temp >> 8)) >> 8;
+        temp = y2_src * a2 + y2_dst * (255 - a2);
+        y2_dst = (temp + (temp >> 8)) >> 8;
+        
+        uint32_t word2_dst = dst_words[2];
+        uint32_t word2_src = src_words[2];
+        
+        uint16_t cr2_dst = (word2_dst >> 0) & 0x3FF;
+        uint16_t y3_dst = (word2_dst >> 10) & 0x3FF;
+        uint16_t cb4_dst = (word2_dst >> 20) & 0x3FF;
+        
+        uint16_t cr2_src = (word2_src >> 0) & 0x3FF;
+        uint16_t y3_src = (word2_src >> 10) & 0x3FF;
+        uint16_t cb4_src = (word2_src >> 20) & 0x3FF;
+        
+        uint8_t a3 = (x + 3 < width) ? alpha[x + 3] : a2;
+        temp = y3_src * a3 + y3_dst * (255 - a3);
+        y3_dst = (temp + (temp >> 8)) >> 8;
+        
+        uint32_t word3_dst = dst_words[3];
+        uint32_t word3_src = src_words[3];
+        
+        uint16_t y4_dst = (word3_dst >> 0) & 0x3FF;
+        uint16_t cr4_dst = (word3_dst >> 10) & 0x3FF;
+        uint16_t y5_dst = (word3_dst >> 20) & 0x3FF;
+        
+        uint16_t y4_src = (word3_src >> 0) & 0x3FF;
+        uint16_t cr4_src = (word3_src >> 10) & 0x3FF;
+        uint16_t y5_src = (word3_src >> 20) & 0x3FF;
+        
+        uint8_t a4 = (x + 4 < width) ? alpha[x + 4] : a3;
+        uint8_t a5 = (x + 5 < width) ? alpha[x + 5] : a4;
+        temp = y4_src * a4 + y4_dst * (255 - a4);
+        y4_dst = (temp + (temp >> 8)) >> 8;
+        temp = y5_src * a5 + y5_dst * (255 - a5);
+        y5_dst = (temp + (temp >> 8)) >> 8;
+        
+        // Blend chroma using average alpha for pixel pairs
+        uint8_t avg_alpha_01 = (a0 + a1) / 2;
+        uint8_t avg_alpha_23 = (a2 + a3) / 2;
+        uint8_t avg_alpha_45 = (a4 + a5) / 2;
+        
+        uint32_t temp32;
+        temp32 = cb0_src * avg_alpha_01 + cb0_dst * (255 - avg_alpha_01);
+        cb0_dst = (temp32 + (temp32 >> 8)) >> 8;
+        temp32 = cr0_src * avg_alpha_01 + cr0_dst * (255 - avg_alpha_01);
+        cr0_dst = (temp32 + (temp32 >> 8)) >> 8;
+        temp32 = cb2_src * avg_alpha_23 + cb2_dst * (255 - avg_alpha_23);
+        cb2_dst = (temp32 + (temp32 >> 8)) >> 8;
+        temp32 = cr2_src * avg_alpha_23 + cr2_dst * (255 - avg_alpha_23);
+        cr2_dst = (temp32 + (temp32 >> 8)) >> 8;
+        temp32 = cb4_src * avg_alpha_45 + cb4_dst * (255 - avg_alpha_45);
+        cb4_dst = (temp32 + (temp32 >> 8)) >> 8;
+        temp32 = cr4_src * avg_alpha_45 + cr4_dst * (255 - avg_alpha_45);
+        cr4_dst = (temp32 + (temp32 >> 8)) >> 8;
+        
+        // Pack back into v210 format
+        dst_words[0] = (cb0_dst & 0x3FF) | ((y0_dst & 0x3FF) << 10) | ((cr0_dst & 0x3FF) << 20);
+        dst_words[1] = (y1_dst & 0x3FF) | ((cb2_dst & 0x3FF) << 10) | ((y2_dst & 0x3FF) << 20);
+        dst_words[2] = (cr2_dst & 0x3FF) | ((y3_dst & 0x3FF) << 10) | ((cb4_dst & 0x3FF) << 20);
+        dst_words[3] = (y4_dst & 0x3FF) | ((cr4_dst & 0x3FF) << 10) | ((y5_dst & 0x3FF) << 20);
+        
+        dst += 16;
+        src += 16;
+    }
+}
+
 static void benchmark_rgba_blending()
 {
     printf("\n=== Benchmarking RGBA Blending ===\n");
@@ -81,11 +279,13 @@ static void benchmark_rgba_blending()
     
     uint8_t *dst = malloc(pixels * 4);
     uint8_t *src = malloc(pixels * 4);
+    uint8_t *dst_copy = malloc(pixels * 4);
     
-    if (!dst || !src) {
+    if (!dst || !src || !dst_copy) {
         printf("Failed to allocate memory for benchmark\n");
         free(dst);
         free(src);
+        free(dst_copy);
         return;
     }
     
@@ -93,23 +293,52 @@ static void benchmark_rgba_blending()
     for (int i = 0; i < pixels * 4; i++) {
         dst[i] = rand() & 0xFF;
         src[i] = rand() & 0xFF;
+        dst_copy[i] = dst[i];
     }
     
+    // Test scalar implementation
+    printf("Scalar:\n");
     clock_t start = clock();
+    
+    for (int i = 0; i < iterations; i++) {
+        alpha_blend_rgba_scalar(dst_copy, src, pixels);
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (pixels * iterations) / (elapsed_scalar * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < pixels * 4; i++) {
+        dst[i] = dst_copy[i];
+    }
+    
+    // Test optimized implementation
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
     
     for (int i = 0; i < iterations; i++) {
         alpha_blend_rgba(dst, src, pixels);
     }
     
-    clock_t end = clock();
-    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
     
-    printf("Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed);
-    printf("Average: %.3f ms per frame\n", elapsed * 1000.0 / iterations);
-    printf("Throughput: %.1f megapixels/second\n", (pixels * iterations) / (elapsed * 1000000.0));
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (pixels * iterations) / (elapsed_opt * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
     free(src);
+    free(dst_copy);
 }
 
 static void test_uyvy_optimized()
@@ -181,12 +410,14 @@ static void benchmark_uyvy_blending()
     
     uint8_t *dst = malloc(uyvy_size);
     uint8_t *src = malloc(uyvy_size);
+    uint8_t *dst_copy = malloc(uyvy_size);
     uint8_t *alpha = malloc(width * height);
     
-    if (!dst || !src || !alpha) {
+    if (!dst || !src || !dst_copy || !alpha) {
         printf("Failed to allocate memory for benchmark\n");
         free(dst);
         free(src);
+        free(dst_copy);
         free(alpha);
         return;
     }
@@ -195,12 +426,39 @@ static void benchmark_uyvy_blending()
     for (int i = 0; i < uyvy_size; i++) {
         dst[i] = rand() & 0xFF;
         src[i] = rand() & 0xFF;
+        dst_copy[i] = dst[i];
     }
     for (int i = 0; i < width * height; i++) {
         alpha[i] = rand() & 0xFF;
     }
     
+    // Test scalar implementation
+    printf("Scalar:\n");
     clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_uyvy_scalar(dst_copy + y * width * 2, src + y * width * 2, alpha + y * width, width);
+        }
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < uyvy_size; i++) {
+        dst[i] = dst_copy[i];
+    }
+    
+    // Test optimized implementation
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
     
     for (int iter = 0; iter < iterations; iter++) {
         for (int y = 0; y < height; y++) {
@@ -208,15 +466,19 @@ static void benchmark_uyvy_blending()
         }
     }
     
-    clock_t end = clock();
-    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
     
-    printf("Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed);
-    printf("Average: %.3f ms per frame\n", elapsed * 1000.0 / iterations);
-    printf("Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed * 1000000.0));
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
     free(src);
+    free(dst_copy);
     free(alpha);
 }
 
@@ -314,12 +576,14 @@ static void benchmark_yuyv_blending()
     
     uint8_t *dst = malloc(yuyv_size);
     uint8_t *src = malloc(yuyv_size);
+    uint8_t *dst_copy = malloc(yuyv_size);
     uint8_t *alpha = malloc(width * height);
     
-    if (!dst || !src || !alpha) {
+    if (!dst || !src || !dst_copy || !alpha) {
         printf("Failed to allocate memory for benchmark\n");
         free(dst);
         free(src);
+        free(dst_copy);
         free(alpha);
         return;
     }
@@ -328,12 +592,39 @@ static void benchmark_yuyv_blending()
     for (int i = 0; i < yuyv_size; i++) {
         dst[i] = rand() & 0xFF;
         src[i] = rand() & 0xFF;
+        dst_copy[i] = dst[i];
     }
     for (int i = 0; i < width * height; i++) {
         alpha[i] = rand() & 0xFF;
     }
     
+    // Test scalar implementation
+    printf("Scalar:\n");
     clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_yuyv_scalar(dst_copy + y * width * 2, src + y * width * 2, alpha + y * width, width);
+        }
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < yuyv_size; i++) {
+        dst[i] = dst_copy[i];
+    }
+    
+    // Test optimized implementation
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
     
     for (int iter = 0; iter < iterations; iter++) {
         for (int y = 0; y < height; y++) {
@@ -341,15 +632,19 @@ static void benchmark_yuyv_blending()
         }
     }
     
-    clock_t end = clock();
-    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
     
-    printf("Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed);
-    printf("Average: %.3f ms per frame\n", elapsed * 1000.0 / iterations);
-    printf("Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed * 1000000.0));
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
     free(src);
+    free(dst_copy);
     free(alpha);
 }
 
@@ -446,12 +741,14 @@ static void benchmark_rgb_blending()
     
     uint8_t *dst = malloc(rgb_size);
     uint8_t *src = malloc(rgb_size);
+    uint8_t *dst_copy = malloc(rgb_size);
     uint8_t *alpha = malloc(width * height);
     
-    if (!dst || !src || !alpha) {
+    if (!dst || !src || !dst_copy || !alpha) {
         printf("Failed to allocate memory for benchmark\n");
         free(dst);
         free(src);
+        free(dst_copy);
         free(alpha);
         return;
     }
@@ -460,12 +757,39 @@ static void benchmark_rgb_blending()
     for (int i = 0; i < rgb_size; i++) {
         dst[i] = rand() & 0xFF;
         src[i] = rand() & 0xFF;
+        dst_copy[i] = dst[i];
     }
     for (int i = 0; i < width * height; i++) {
         alpha[i] = rand() & 0xFF;
     }
     
+    // Test scalar implementation
+    printf("Scalar:\n");
     clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_rgb_scalar(dst_copy + y * width * 3, src + y * width * 3, alpha + y * width, width);
+        }
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < rgb_size; i++) {
+        dst[i] = dst_copy[i];
+    }
+    
+    // Test optimized implementation
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
     
     for (int iter = 0; iter < iterations; iter++) {
         for (int y = 0; y < height; y++) {
@@ -473,15 +797,155 @@ static void benchmark_rgb_blending()
         }
     }
     
-    clock_t end = clock();
-    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
     
-    printf("Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed);
-    printf("Average: %.3f ms per frame\n", elapsed * 1000.0 / iterations);
-    printf("Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed * 1000000.0));
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
     free(src);
+    free(dst_copy);
+    free(alpha);
+}
+
+static void test_v210_blending()
+{
+    printf("\n=== Testing v210 Blending ===\n");
+    
+    // v210 format: 6 pixels in 16 bytes
+    // Test with minimal data - 6 pixels
+    uint8_t dst[16] = {0};
+    uint8_t src[16] = {0};
+    uint8_t alpha[6] = {128, 128, 128, 128, 128, 128}; // 50% alpha for all
+    
+    // Initialize v210 data: create simple pattern
+    // Word 0: Cb0(128) Y0(235) Cr0(128) - bright luma, neutral chroma
+    uint32_t *dst_words = (uint32_t*)dst;
+    uint32_t *src_words = (uint32_t*)src;
+    
+    // Destination: bright pixels (Y=940 in 10-bit scale, chroma=512)
+    dst_words[0] = (512 << 0) | (940 << 10) | (512 << 20);  // Cb0 Y0 Cr0
+    dst_words[1] = (940 << 0) | (512 << 10) | (940 << 20);  // Y1 Cb2 Y2
+    dst_words[2] = (512 << 0) | (940 << 10) | (512 << 20);  // Cr2 Y3 Cb4
+    dst_words[3] = (940 << 0) | (512 << 10) | (940 << 20);  // Y4 Cr4 Y5
+    
+    // Source: dark pixels (Y=64 in 10-bit scale, chroma=512)
+    src_words[0] = (512 << 0) | (64 << 10) | (512 << 20);   // Cb0 Y0 Cr0
+    src_words[1] = (64 << 0) | (512 << 10) | (64 << 20);    // Y1 Cb2 Y2
+    src_words[2] = (512 << 0) | (64 << 10) | (512 << 20);   // Cr2 Y3 Cb4
+    src_words[3] = (64 << 0) | (512 << 10) | (64 << 20);    // Y4 Cr4 Y5
+    
+    printf("Before blend - dst Y0=%d (10-bit)\n", (dst_words[0] >> 10) & 0x3FF);
+    printf("Before blend - src Y0=%d (10-bit)\n", (src_words[0] >> 10) & 0x3FF);
+    
+    alpha_blend_v210(dst, src, alpha, 6);
+    
+    // Check result
+    dst_words = (uint32_t*)dst;
+    uint16_t y0_result = (dst_words[0] >> 10) & 0x3FF;
+    printf("After blend  - dst Y0=%d (10-bit)\n", y0_result);
+    
+    // Calculate expected manually step by step
+    uint32_t manual_calc = 64 * 128 + 940 * 127;  // = 8192 + 119380 = 127572
+    uint16_t manual_result = (manual_calc + (manual_calc >> 8)) >> 8;  // proper division by 255
+    printf("Manual calculation: (64*128 + 940*127) = %u, proper division = %d\n", manual_calc, manual_result);
+    
+    // Expected: (64 * 128 + 940 * 127) / 255 ≈ 500 in 10-bit scale
+    int expected = manual_result;
+    int diff = abs(y0_result - expected);
+    printf("Expected Y0 ~%d, got %d, diff=%d %s\n", expected, y0_result, diff, (diff <= 8) ? "✓" : "✗");
+}
+
+static void benchmark_v210_blending()
+{
+    printf("\n=== Benchmarking v210 Blending ===\n");
+    
+    const int width = 1920;
+    const int height = 1080;
+    const int iterations = 100;
+    // v210: 6 pixels in 16 bytes, so width pixels need (width/6)*16 bytes
+    const int v210_size = (width / 6) * 16 * height;
+    
+    uint8_t *dst = malloc(v210_size);
+    uint8_t *src = malloc(v210_size);
+    uint8_t *dst_copy = malloc(v210_size);
+    uint8_t *alpha = malloc(width * height);
+    
+    if (!dst || !src || !dst_copy || !alpha) {
+        printf("Failed to allocate memory for benchmark\n");
+        free(dst);
+        free(src);
+        free(dst_copy);
+        free(alpha);
+        return;
+    }
+    
+    // Initialize with random data
+    for (int i = 0; i < v210_size; i++) {
+        dst[i] = rand() & 0xFF;
+        src[i] = rand() & 0xFF;
+        dst_copy[i] = dst[i];
+    }
+    for (int i = 0; i < width * height; i++) {
+        alpha[i] = rand() & 0xFF;
+    }
+    
+    // Test scalar implementation
+    printf("Scalar:\n");
+    clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_v210_scalar(dst_copy + y * (width / 6) * 16, 
+                                  src + y * (width / 6) * 16, 
+                                  alpha + y * width, width);
+        }
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < v210_size; i++) {
+        dst[i] = dst_copy[i];
+    }
+    
+    // Test optimized implementation
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_v210(dst + y * (width / 6) * 16, 
+                           src + y * (width / 6) * 16, 
+                           alpha + y * width, width);
+        }
+    }
+    
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
+    
+    free(dst);
+    free(src);
+    free(dst_copy);
     free(alpha);
 }
 
@@ -497,11 +961,13 @@ int main()
     test_yuyv_optimized();
     test_rgb_blending();
     test_rgb_optimized();
+    test_v210_blending();
     
     benchmark_rgba_blending();
     benchmark_uyvy_blending();
     benchmark_yuyv_blending();
     benchmark_rgb_blending();
+    benchmark_v210_blending();
     
     return 0;
 }
