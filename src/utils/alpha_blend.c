@@ -1638,10 +1638,9 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
 }
 
 /**
- * Native R10k alpha blending (10-bit RGB)
- * R10k uses 4 bytes per pixel with 10 bits per component
+ * Scalar R10k alpha blending
  */
-void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+static void alpha_blend_r10k_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         for (int x = 0; x < width; x++) {
                 uint32_t dst_pixel = *(uint32_t *)dst;
@@ -1657,10 +1656,14 @@ void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 uint16_t g_src = (src_pixel >> 10) & 0x3FF;
                 uint16_t b_src = (src_pixel >> 0) & 0x3FF;
                 
-                // Blend with 10-bit precision
-                r_dst = (r_src * a + r_dst * (255 - a)) / 255;
-                g_dst = (g_src * a + g_dst * (255 - a)) / 255;
-                b_dst = (b_src * a + b_dst * (255 - a)) / 255;
+                // Blend with 10-bit precision using proper division
+                uint32_t temp;
+                temp = r_src * a + r_dst * (255 - a);
+                r_dst = (temp + (temp >> 8)) >> 8;
+                temp = g_src * a + g_dst * (255 - a);
+                g_dst = (temp + (temp >> 8)) >> 8;
+                temp = b_src * a + b_dst * (255 - a);
+                b_dst = (temp + (temp >> 8)) >> 8;
                 
                 // Pack back with padding in bits 30-31
                 *(uint32_t *)dst = ((r_dst & 0x3FF) << 20) | 
@@ -1670,6 +1673,207 @@ void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 dst += 4;
                 src += 4;
         }
+}
+
+#ifdef __SSE2__
+/**
+ * SSE2 optimized R10k alpha blending - processes 4 pixels at once
+ * R10k is 4 bytes per pixel: RR RRGG GGGB BBBB (10 bits each + 2 pad bits)
+ */
+static void alpha_blend_r10k_sse2(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        const __m128i mask_10bit = _mm_set1_epi32(0x3FF);
+        
+        int x = 0;
+        
+        // Process 4 pixels at a time (16 bytes)
+        for (; x <= width - 4; x += 4) {
+                // Load 4 pixels (16 bytes total)
+                __m128i dst_pixels = _mm_loadu_si128((const __m128i*)(dst + x * 4));
+                __m128i src_pixels = _mm_loadu_si128((const __m128i*)(src + x * 4));
+                
+                // Load 4 alpha values
+                uint32_t alpha4 = *(uint32_t*)(alpha + x);
+                
+                // Extract individual 32-bit pixels
+                uint32_t dst_pixel[4], src_pixel[4];
+                dst_pixel[0] = _mm_extract_epi32(dst_pixels, 0);
+                dst_pixel[1] = _mm_extract_epi32(dst_pixels, 1);
+                dst_pixel[2] = _mm_extract_epi32(dst_pixels, 2);
+                dst_pixel[3] = _mm_extract_epi32(dst_pixels, 3);
+                
+                src_pixel[0] = _mm_extract_epi32(src_pixels, 0);
+                src_pixel[1] = _mm_extract_epi32(src_pixels, 1);
+                src_pixel[2] = _mm_extract_epi32(src_pixels, 2);
+                src_pixel[3] = _mm_extract_epi32(src_pixels, 3);
+                
+                // Extract alpha values
+                uint8_t alpha_vals[4] = {
+                        alpha4 & 0xFF,
+                        (alpha4 >> 8) & 0xFF,
+                        (alpha4 >> 16) & 0xFF,
+                        (alpha4 >> 24) & 0xFF
+                };
+                
+                // Process each pixel
+                uint32_t result_pixels[4];
+                for (int i = 0; i < 4; i++) {
+                        // Extract 10-bit components
+                        uint16_t r_dst = (dst_pixel[i] >> 20) & 0x3FF;
+                        uint16_t g_dst = (dst_pixel[i] >> 10) & 0x3FF;
+                        uint16_t b_dst = (dst_pixel[i] >> 0) & 0x3FF;
+                        
+                        uint16_t r_src = (src_pixel[i] >> 20) & 0x3FF;
+                        uint16_t g_src = (src_pixel[i] >> 10) & 0x3FF;
+                        uint16_t b_src = (src_pixel[i] >> 0) & 0x3FF;
+                        
+                        uint8_t a = alpha_vals[i];
+                        
+                        // Blend with proper division
+                        uint32_t temp;
+                        temp = r_src * a + r_dst * (255 - a);
+                        r_dst = (temp + (temp >> 8)) >> 8;
+                        temp = g_src * a + g_dst * (255 - a);
+                        g_dst = (temp + (temp >> 8)) >> 8;
+                        temp = b_src * a + b_dst * (255 - a);
+                        b_dst = (temp + (temp >> 8)) >> 8;
+                        
+                        // Pack result
+                        result_pixels[i] = ((r_dst & 0x3FF) << 20) | 
+                                         ((g_dst & 0x3FF) << 10) | 
+                                         (b_dst & 0x3FF);
+                }
+                
+                // Store results
+                __m128i result = _mm_set_epi32(result_pixels[3], result_pixels[2], 
+                                             result_pixels[1], result_pixels[0]);
+                _mm_storeu_si128((__m128i*)(dst + x * 4), result);
+        }
+        
+        // Handle remaining pixels with scalar code
+        alpha_blend_r10k_scalar(dst + x * 4, src + x * 4, alpha + x, width - x);
+}
+#endif
+
+#ifdef __AVX2__
+/**
+ * AVX2 optimized R10k alpha blending - processes 8 pixels at once
+ */
+static void alpha_blend_r10k_avx2(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        int x = 0;
+        
+        // Use SSE2 for chunks of 4 pixels
+        for (; x <= width - 8; x += 8) {
+#ifdef __SSE2__
+                alpha_blend_r10k_sse2(dst + x * 4, src + x * 4, alpha + x, 4);
+                alpha_blend_r10k_sse2(dst + (x + 4) * 4, src + (x + 4) * 4, alpha + x + 4, 4);
+#else
+                alpha_blend_r10k_scalar(dst + x * 4, src + x * 4, alpha + x, 8);
+#endif
+        }
+        
+        // Handle remaining pixels
+        if (x < width) {
+#ifdef __SSE2__
+                alpha_blend_r10k_sse2(dst + x * 4, src + x * 4, alpha + x, width - x);
+#else
+                alpha_blend_r10k_scalar(dst + x * 4, src + x * 4, alpha + x, width - x);
+#endif
+        }
+}
+#endif
+
+#ifdef __ARM_NEON
+/**
+ * ARM NEON optimized R10k alpha blending
+ */
+static void alpha_blend_r10k_neon(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        int x = 0;
+        
+        // Process 4 pixels at a time (16 bytes)
+        for (; x <= width - 4; x += 4) {
+                // Load 4 pixels (16 bytes)
+                uint32x4_t dst_pixels = vld1q_u32((const uint32_t*)(dst + x * 4));
+                uint32x4_t src_pixels = vld1q_u32((const uint32_t*)(src + x * 4));
+                
+                // Load 4 alpha values
+                uint32_t alpha4 = *(uint32_t*)(alpha + x);
+                
+                // Extract individual pixels
+                uint32_t dst_pixel[4], src_pixel[4];
+                dst_pixel[0] = vgetq_lane_u32(dst_pixels, 0);
+                dst_pixel[1] = vgetq_lane_u32(dst_pixels, 1);
+                dst_pixel[2] = vgetq_lane_u32(dst_pixels, 2);
+                dst_pixel[3] = vgetq_lane_u32(dst_pixels, 3);
+                
+                src_pixel[0] = vgetq_lane_u32(src_pixels, 0);
+                src_pixel[1] = vgetq_lane_u32(src_pixels, 1);
+                src_pixel[2] = vgetq_lane_u32(src_pixels, 2);
+                src_pixel[3] = vgetq_lane_u32(src_pixels, 3);
+                
+                // Extract alpha values
+                uint8_t alpha_vals[4] = {
+                        alpha4 & 0xFF,
+                        (alpha4 >> 8) & 0xFF,
+                        (alpha4 >> 16) & 0xFF,
+                        (alpha4 >> 24) & 0xFF
+                };
+                
+                // Process each pixel
+                uint32_t result_pixels[4];
+                for (int i = 0; i < 4; i++) {
+                        // Extract 10-bit components
+                        uint16_t r_dst = (dst_pixel[i] >> 20) & 0x3FF;
+                        uint16_t g_dst = (dst_pixel[i] >> 10) & 0x3FF;
+                        uint16_t b_dst = (dst_pixel[i] >> 0) & 0x3FF;
+                        
+                        uint16_t r_src = (src_pixel[i] >> 20) & 0x3FF;
+                        uint16_t g_src = (src_pixel[i] >> 10) & 0x3FF;
+                        uint16_t b_src = (src_pixel[i] >> 0) & 0x3FF;
+                        
+                        uint8_t a = alpha_vals[i];
+                        
+                        // Blend with proper division
+                        uint32_t temp;
+                        temp = r_src * a + r_dst * (255 - a);
+                        r_dst = (temp + (temp >> 8)) >> 8;
+                        temp = g_src * a + g_dst * (255 - a);
+                        g_dst = (temp + (temp >> 8)) >> 8;
+                        temp = b_src * a + b_dst * (255 - a);
+                        b_dst = (temp + (temp >> 8)) >> 8;
+                        
+                        // Pack result
+                        result_pixels[i] = ((r_dst & 0x3FF) << 20) | 
+                                         ((g_dst & 0x3FF) << 10) | 
+                                         (b_dst & 0x3FF);
+                }
+                
+                // Store results
+                uint32x4_t result = vld1q_u32(result_pixels);
+                vst1q_u32((uint32_t*)(dst + x * 4), result);
+        }
+        
+        // Handle remaining pixels
+        alpha_blend_r10k_scalar(dst + x * 4, src + x * 4, alpha + x, width - x);
+}
+#endif
+
+/**
+ * Native R10k alpha blending with SIMD optimization
+ */
+void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+#ifdef __AVX2__
+        alpha_blend_r10k_avx2(dst, src, alpha, width);
+#elif defined(__SSE2__)
+        alpha_blend_r10k_sse2(dst, src, alpha, width);
+#elif defined(__ARM_NEON)
+        alpha_blend_r10k_neon(dst, src, alpha, width);
+#else
+        alpha_blend_r10k_scalar(dst, src, alpha, width);
+#endif
 }
 
 /**

@@ -76,6 +76,7 @@ static void alpha_blend_uyvy_scalar(uint8_t *dst, const uint8_t *src, const uint
 static void alpha_blend_yuyv_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
 static void alpha_blend_rgb_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
 static void alpha_blend_v210_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
+static void alpha_blend_r10k_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
 
 // Scalar implementations for testing
 static void alpha_blend_rgba_scalar(uint8_t *dst, const uint8_t *src, int width)
@@ -265,6 +266,41 @@ static void alpha_blend_v210_scalar(uint8_t *dst, const uint8_t *src, const uint
         
         dst += 16;
         src += 16;
+    }
+}
+
+static void alpha_blend_r10k_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+    for (int x = 0; x < width; x++) {
+        uint32_t dst_pixel = *(uint32_t *)dst;
+        uint32_t src_pixel = *(uint32_t *)src;
+        uint8_t a = alpha[x];
+        
+        // Extract 10-bit components
+        uint16_t r_dst = (dst_pixel >> 20) & 0x3FF;
+        uint16_t g_dst = (dst_pixel >> 10) & 0x3FF;
+        uint16_t b_dst = (dst_pixel >> 0) & 0x3FF;
+        
+        uint16_t r_src = (src_pixel >> 20) & 0x3FF;
+        uint16_t g_src = (src_pixel >> 10) & 0x3FF;
+        uint16_t b_src = (src_pixel >> 0) & 0x3FF;
+        
+        // Blend with 10-bit precision using proper division
+        uint32_t temp;
+        temp = r_src * a + r_dst * (255 - a);
+        r_dst = (temp + (temp >> 8)) >> 8;
+        temp = g_src * a + g_dst * (255 - a);
+        g_dst = (temp + (temp >> 8)) >> 8;
+        temp = b_src * a + b_dst * (255 - a);
+        b_dst = (temp + (temp >> 8)) >> 8;
+        
+        // Pack back with padding in bits 30-31
+        *(uint32_t *)dst = ((r_dst & 0x3FF) << 20) | 
+                           ((g_dst & 0x3FF) << 10) | 
+                           (b_dst & 0x3FF);
+        
+        dst += 4;
+        src += 4;
     }
 }
 
@@ -949,6 +985,141 @@ static void benchmark_v210_blending()
     free(alpha);
 }
 
+static void test_r10k_blending()
+{
+    printf("\n=== Testing R10k Blending ===\n");
+    
+    // R10k format: 4 bytes per pixel, 10 bits per RGB component
+    uint8_t dst[8] = {0}; // 2 pixels
+    uint8_t src[8] = {0};
+    uint8_t alpha[2] = {128, 192}; // 50% and 75% alpha
+    
+    // Initialize R10k data
+    uint32_t *dst_pixels = (uint32_t*)dst;
+    uint32_t *src_pixels = (uint32_t*)src;
+    
+    // Destination: bright pixel (RGB = 800, 600, 400 in 10-bit scale)
+    dst_pixels[0] = (800 << 20) | (600 << 10) | 400;  // R G B
+    dst_pixels[1] = (800 << 20) | (600 << 10) | 400;
+    
+    // Source: dark pixel (RGB = 100, 200, 300 in 10-bit scale)  
+    src_pixels[0] = (100 << 20) | (200 << 10) | 300;  // R G B
+    src_pixels[1] = (100 << 20) | (200 << 10) | 300;
+    
+    printf("Before blend - dst R=%d G=%d B=%d (10-bit)\n", 
+           (dst_pixels[0] >> 20) & 0x3FF,
+           (dst_pixels[0] >> 10) & 0x3FF,
+           dst_pixels[0] & 0x3FF);
+    printf("Before blend - src R=%d G=%d B=%d (10-bit)\n",
+           (src_pixels[0] >> 20) & 0x3FF,
+           (src_pixels[0] >> 10) & 0x3FF,
+           src_pixels[0] & 0x3FF);
+    
+    alpha_blend_r10k(dst, src, alpha, 2);
+    
+    // Check result
+    dst_pixels = (uint32_t*)dst;
+    uint16_t r_result = (dst_pixels[0] >> 20) & 0x3FF;
+    uint16_t g_result = (dst_pixels[0] >> 10) & 0x3FF;
+    uint16_t b_result = dst_pixels[0] & 0x3FF;
+    
+    printf("After blend  - dst R=%d G=%d B=%d (10-bit)\n", r_result, g_result, b_result);
+    
+    // Calculate expected manually for R component: (100 * 128 + 800 * 127) / 255
+    uint32_t expected_r_calc = 100 * 128 + 800 * 127;
+    uint16_t expected_r = (expected_r_calc + (expected_r_calc >> 8)) >> 8;
+    int diff = abs(r_result - expected_r);
+    
+    printf("Expected R ~%d, got %d, diff=%d %s\n", expected_r, r_result, diff, (diff <= 4) ? "✓" : "✗");
+}
+
+static void benchmark_r10k_blending()
+{
+    printf("\n=== Benchmarking R10k Blending ===\n");
+    
+    const int width = 1920;
+    const int height = 1080;
+    const int iterations = 100;
+    const int r10k_size = width * height * 4; // 4 bytes per pixel
+    
+    uint8_t *dst = malloc(r10k_size);
+    uint8_t *src = malloc(r10k_size);
+    uint8_t *dst_copy = malloc(r10k_size);
+    uint8_t *alpha = malloc(width * height);
+    
+    if (!dst || !src || !dst_copy || !alpha) {
+        printf("Failed to allocate memory for benchmark\n");
+        free(dst);
+        free(src);
+        free(dst_copy);
+        free(alpha);
+        return;
+    }
+    
+    // Initialize with random data
+    for (int i = 0; i < r10k_size; i++) {
+        dst[i] = rand() & 0xFF;
+        src[i] = rand() & 0xFF;
+        dst_copy[i] = dst[i];
+    }
+    for (int i = 0; i < width * height; i++) {
+        alpha[i] = rand() & 0xFF;
+    }
+    
+    // Test scalar implementation
+    printf("Scalar:\n");
+    clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_r10k_scalar(dst_copy + y * width * 4, 
+                                  src + y * width * 4, 
+                                  alpha + y * width, width);
+        }
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < r10k_size; i++) {
+        dst[i] = dst_copy[i];
+    }
+    
+    // Test optimized implementation
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_r10k(dst + y * width * 4, 
+                           src + y * width * 4, 
+                           alpha + y * width, width);
+        }
+    }
+    
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
+    
+    free(dst);
+    free(src);
+    free(dst_copy);
+    free(alpha);
+}
+
 int main()
 {
     printf("Alpha Blending Test Program\n");
@@ -962,12 +1133,14 @@ int main()
     test_rgb_blending();
     test_rgb_optimized();
     test_v210_blending();
+    test_r10k_blending();
     
     benchmark_rgba_blending();
     benchmark_uyvy_blending();
     benchmark_yuyv_blending();
     benchmark_rgb_blending();
     benchmark_v210_blending();
+    benchmark_r10k_blending();
     
     return 0;
 }
