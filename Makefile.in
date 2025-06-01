@@ -143,6 +143,7 @@ COMMON_OBJS     = \
 		tools/ipc_frame_ug.o \
 		tools/ipc_frame_unix.o \
 		tools/ipc_frame.o \
+		src/utils/alpha_blend.o \
 		src/utils/audio_buffer.o \
 		src/utils/color_out.o \
 		src/utils/config_file.o \

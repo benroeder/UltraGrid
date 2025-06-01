@@ -3484,6 +3484,7 @@ if test "$build_default" != no || test "$req_files" = all; then
         src/vo_postprocess/deinterlace.o
         src/vo_postprocess/delay.o
         src/vo_postprocess/interlace.o
+        src/vo_postprocess/overlay.o
         src/vo_postprocess/split.o
         src/vo_postprocess/temporal-deint.o
         "
