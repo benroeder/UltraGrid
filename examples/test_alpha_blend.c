@@ -220,6 +220,139 @@ static void benchmark_uyvy_blending()
     free(alpha);
 }
 
+static void test_yuyv_blending()
+{
+    printf("\n=== Testing YUYV Blending ===\n");
+    
+    // YUYV format: Y0 U0 Y1 V0 (covers 2 pixels)
+    uint8_t dst[4] = {235, 128, 235, 128}; // Bright luma, neutral chroma
+    uint8_t src[4] = {16, 128, 16, 128};   // Dark luma, neutral chroma
+    uint8_t alpha[2] = {128, 128};         // 50% alpha for both pixels
+    
+    printf("Before blend - dst: Y0=%d U=%d Y1=%d V=%d\n", dst[0], dst[1], dst[2], dst[3]);
+    printf("Before blend - src: Y0=%d U=%d Y1=%d V=%d\n", src[0], src[1], src[2], src[3]);
+    printf("Alpha values: %d, %d\n", alpha[0], alpha[1]);
+    
+    alpha_blend_yuyv(dst, src, alpha, 2);
+    
+    printf("After blend  - dst: Y0=%d U=%d Y1=%d V=%d\n", dst[0], dst[1], dst[2], dst[3]);
+}
+
+static void test_yuyv_optimized()
+{
+    printf("\n=== Testing YUYV Optimized Blending ===\n");
+    printf("Implementation: %s\n", alpha_blend_get_implementation());
+    
+    // Test various widths to ensure SIMD and scalar paths work
+    int test_widths[] = {8, 10, 16, 20, 1920};
+    int num_widths = sizeof(test_widths) / sizeof(test_widths[0]);
+    
+    for (int w = 0; w < num_widths; w++) {
+        int width = test_widths[w];
+        int size = width * 2; // YUYV is 2 bytes per pixel
+        
+        uint8_t *dst = malloc(size);
+        uint8_t *src = malloc(size);
+        uint8_t *alpha = malloc(width);
+        
+        if (!dst || !src || !alpha) {
+            printf("Memory allocation failed\n");
+            free(dst);
+            free(src);
+            free(alpha);
+            continue;
+        }
+        
+        // Initialize YUYV data with known pattern
+        for (int x = 0; x < width; x += 2) {
+            // Destination: bright pixels
+            dst[x*2 + 0] = 235;  // Y0
+            dst[x*2 + 1] = 128;  // U
+            dst[x*2 + 2] = 235;  // Y1  
+            dst[x*2 + 3] = 128;  // V
+            
+            // Source: dark pixels
+            src[x*2 + 0] = 16;   // Y0
+            src[x*2 + 1] = 128;  // U
+            src[x*2 + 2] = 16;   // Y1
+            src[x*2 + 3] = 128;  // V
+            
+            // Alpha: 50% blend
+            alpha[x] = 128;
+            if (x + 1 < width) alpha[x + 1] = 128;
+        }
+        
+        alpha_blend_yuyv(dst, src, alpha, width);
+        
+        // Check first pixel results
+        uint8_t y0 = dst[0];
+        uint8_t u = dst[1];
+        uint8_t y1 = dst[2]; 
+        uint8_t v = dst[3];
+        
+        // Expected: (16 * 128 + 235 * 127) / 255 ≈ 125
+        int expected_y = 125;
+        int diff_y = abs(y0 - expected_y);
+        
+        printf("Width %d: Y0=%d U=%d Y1=%d V=%d (Y expected ~%d, got %d, diff=%d) %s\n", 
+               width, y0, u, y1, v, expected_y, y0, diff_y, (diff_y <= 2) ? "✓" : "✗");
+        
+        free(dst);
+        free(src);
+        free(alpha);
+    }
+}
+
+static void benchmark_yuyv_blending()
+{
+    printf("\n=== Benchmarking YUYV Blending ===\n");
+    
+    const int width = 1920;
+    const int height = 1080;
+    const int iterations = 100;
+    const int yuyv_size = width * height * 2; // 2 bytes per pixel
+    
+    uint8_t *dst = malloc(yuyv_size);
+    uint8_t *src = malloc(yuyv_size);
+    uint8_t *alpha = malloc(width * height);
+    
+    if (!dst || !src || !alpha) {
+        printf("Failed to allocate memory for benchmark\n");
+        free(dst);
+        free(src);
+        free(alpha);
+        return;
+    }
+    
+    // Initialize with random data
+    for (int i = 0; i < yuyv_size; i++) {
+        dst[i] = rand() & 0xFF;
+        src[i] = rand() & 0xFF;
+    }
+    for (int i = 0; i < width * height; i++) {
+        alpha[i] = rand() & 0xFF;
+    }
+    
+    clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_yuyv(dst + y * width * 2, src + y * width * 2, alpha + y * width, width);
+        }
+    }
+    
+    clock_t end = clock();
+    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    printf("Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed);
+    printf("Average: %.3f ms per frame\n", elapsed * 1000.0 / iterations);
+    printf("Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed * 1000000.0));
+    
+    free(dst);
+    free(src);
+    free(alpha);
+}
+
 int main()
 {
     printf("Alpha Blending Test Program\n");
@@ -228,9 +361,12 @@ int main()
     test_rgba_blending();
     test_uyvy_blending();
     test_uyvy_optimized();
+    test_yuyv_blending();
+    test_yuyv_optimized();
     
     benchmark_rgba_blending();
     benchmark_uyvy_blending();
+    benchmark_yuyv_blending();
     
     return 0;
 }
