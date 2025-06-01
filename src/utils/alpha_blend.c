@@ -1015,9 +1015,9 @@ void alpha_blend_yuyv(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
 }
 
 /**
- * Native RGB alpha blending
+ * Scalar RGB alpha blending
  */
-void alpha_blend_rgb(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+static void alpha_blend_rgb_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         for (int x = 0; x < width; x++) {
                 uint8_t a = alpha[x];
@@ -1029,6 +1029,203 @@ void alpha_blend_rgb(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int
                 dst += 3;
                 src += 3;
         }
+}
+
+#ifdef __SSE2__
+/**
+ * SSE2 optimized RGB alpha blending - processes 4 pixels at once
+ * RGB is 3 bytes per pixel, so 4 pixels = 12 bytes
+ */
+static void alpha_blend_rgb_sse2(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        const __m128i zero = _mm_setzero_si128();
+        const __m128i c255 = _mm_set1_epi16(255);
+        
+        int x = 0;
+        
+        // Process 4 pixels at a time (12 bytes each)
+        for (; x <= width - 4; x += 4) {
+                // Load 12 bytes (4 RGB pixels)
+                __m128i src_rgb = _mm_loadu_si128((const __m128i*)(src + x * 3));
+                __m128i dst_rgb = _mm_loadu_si128((const __m128i*)(dst + x * 3));
+                
+                // Load 4 alpha values and expand to 16-bit
+                uint32_t alpha4 = *(uint32_t*)(alpha + x);
+                __m128i alpha_8 = _mm_cvtsi32_si128(alpha4);
+                alpha_8 = _mm_unpacklo_epi8(alpha_8, zero);
+                
+                // Duplicate each alpha for RGB components: a0 a0 a0 a1 a1 a1 a2 a2
+                __m128i alpha_dup = _mm_shufflelo_epi16(alpha_8, _MM_SHUFFLE(1,1,0,0));
+                alpha_dup = _mm_shufflehi_epi16(alpha_dup, _MM_SHUFFLE(3,2,2,1));
+                alpha_dup = _mm_shuffle_epi32(alpha_dup, _MM_SHUFFLE(2,1,0,0));
+                
+                // Another shuffle to get: a0 a0 a0 a1 a1 a1 a2 a2
+                __m128i alpha_rgb = _mm_set_epi16(
+                        ((alpha4 >> 8) & 0xFF), ((alpha4 >> 8) & 0xFF), ((alpha4 >> 8) & 0xFF), // a1 a1 a1
+                        (alpha4 & 0xFF), (alpha4 & 0xFF), (alpha4 & 0xFF),                      // a0 a0 a0
+                        ((alpha4 >> 16) & 0xFF), ((alpha4 >> 16) & 0xFF)                       // a2 a2
+                );
+                
+                // Split RGB data into two 8x16 vectors for processing
+                __m128i src_lo = _mm_unpacklo_epi8(src_rgb, zero);
+                __m128i src_hi = _mm_unpackhi_epi8(src_rgb, zero);
+                __m128i dst_lo = _mm_unpacklo_epi8(dst_rgb, zero);
+                __m128i dst_hi = _mm_unpackhi_epi8(dst_rgb, zero);
+                
+                // Calculate inverse alpha
+                __m128i inv_alpha_rgb = _mm_sub_epi16(c255, alpha_rgb);
+                
+                // Blend low part
+                __m128i temp_lo = _mm_mullo_epi16(src_lo, alpha_rgb);
+                temp_lo = _mm_add_epi16(temp_lo, _mm_mullo_epi16(dst_lo, inv_alpha_rgb));
+                __m128i div_lo = _mm_add_epi16(temp_lo, _mm_srli_epi16(temp_lo, 8));
+                __m128i result_lo = _mm_srli_epi16(div_lo, 8);
+                
+                // For high part, we need the remaining alphas
+                __m128i alpha_hi = _mm_set_epi16(
+                        ((alpha4 >> 24) & 0xFF), ((alpha4 >> 24) & 0xFF), // a3 a3
+                        ((alpha4 >> 16) & 0xFF), ((alpha4 >> 16) & 0xFF), // a2 a2
+                        0, 0, 0, 0
+                );
+                __m128i inv_alpha_hi = _mm_sub_epi16(c255, alpha_hi);
+                
+                // Blend high part  
+                __m128i temp_hi = _mm_mullo_epi16(src_hi, alpha_hi);
+                temp_hi = _mm_add_epi16(temp_hi, _mm_mullo_epi16(dst_hi, inv_alpha_hi));
+                __m128i div_hi = _mm_add_epi16(temp_hi, _mm_srli_epi16(temp_hi, 8));
+                __m128i result_hi = _mm_srli_epi16(div_hi, 8);
+                
+                // Pack back to 8-bit and store
+                __m128i result = _mm_packus_epi16(result_lo, result_hi);
+                _mm_storeu_si128((__m128i*)(dst + x * 3), result);
+        }
+        
+        // Handle remaining pixels with scalar code
+        alpha_blend_rgb_scalar(dst + x * 3, src + x * 3, alpha + x, width - x);
+}
+#endif
+
+#ifdef __AVX2__
+/**
+ * AVX2 optimized RGB alpha blending - processes 8 pixels at once  
+ * RGB is 3 bytes per pixel, so 8 pixels = 24 bytes
+ */
+static void alpha_blend_rgb_avx2(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        // For now, fall back to SSE2 since RGB packing is complex with AVX2
+        int x = 0;
+        
+        // Process larger chunks with SSE2
+        for (; x <= width - 8; x += 8) {
+#ifdef __SSE2__
+                alpha_blend_rgb_sse2(dst + x * 3, src + x * 3, alpha + x, (width - x > 8) ? 8 : (width - x));
+#else
+                alpha_blend_rgb_scalar(dst + x * 3, src + x * 3, alpha + x, (width - x > 8) ? 8 : (width - x));
+#endif
+        }
+        
+        // Handle remaining pixels
+#ifdef __SSE2__
+        alpha_blend_rgb_sse2(dst + x * 3, src + x * 3, alpha + x, width - x);
+#else
+        alpha_blend_rgb_scalar(dst + x * 3, src + x * 3, alpha + x, width - x);
+#endif
+}
+#endif
+
+#ifdef __ARM_NEON
+/**
+ * ARM NEON optimized RGB alpha blending
+ */
+static void alpha_blend_rgb_neon(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+        int x = 0;
+        
+        // Process 4 pixels at a time (12 bytes)
+        for (; x <= width - 4; x += 4) {
+                // Load 12 bytes (4 RGB pixels) into two 8-byte vectors
+                uint8x8_t src_low = vld1_u8(src + x * 3);
+                uint8x8_t src_high = vld1_u8(src + x * 3 + 8);
+                uint8x8_t dst_low = vld1_u8(dst + x * 3);
+                uint8x8_t dst_high = vld1_u8(dst + x * 3 + 8);
+                
+                // Load 4 alpha values
+                uint32_t alpha4 = *(uint32_t*)(alpha + x);
+                uint8x8_t alpha_values = vdup_n_u8(0);
+                alpha_values = vset_lane_u8(alpha4 & 0xFF, alpha_values, 0);
+                alpha_values = vset_lane_u8((alpha4 >> 8) & 0xFF, alpha_values, 1);
+                alpha_values = vset_lane_u8((alpha4 >> 16) & 0xFF, alpha_values, 2);
+                alpha_values = vset_lane_u8((alpha4 >> 24) & 0xFF, alpha_values, 3);
+                
+                // Duplicate alphas for RGB: a0 a0 a0 a1 a1 a1 a2 a2
+                uint8x8_t alpha_rgb_low = vdup_n_u8(0);
+                alpha_rgb_low = vset_lane_u8(vget_lane_u8(alpha_values, 0), alpha_rgb_low, 0); // R0
+                alpha_rgb_low = vset_lane_u8(vget_lane_u8(alpha_values, 0), alpha_rgb_low, 1); // G0
+                alpha_rgb_low = vset_lane_u8(vget_lane_u8(alpha_values, 0), alpha_rgb_low, 2); // B0
+                alpha_rgb_low = vset_lane_u8(vget_lane_u8(alpha_values, 1), alpha_rgb_low, 3); // R1
+                alpha_rgb_low = vset_lane_u8(vget_lane_u8(alpha_values, 1), alpha_rgb_low, 4); // G1
+                alpha_rgb_low = vset_lane_u8(vget_lane_u8(alpha_values, 1), alpha_rgb_low, 5); // B1
+                alpha_rgb_low = vset_lane_u8(vget_lane_u8(alpha_values, 2), alpha_rgb_low, 6); // R2
+                alpha_rgb_low = vset_lane_u8(vget_lane_u8(alpha_values, 2), alpha_rgb_low, 7); // G2
+                
+                // For high part: B2 R3 G3 B3 (4 remaining bytes)
+                uint8x8_t alpha_rgb_high = vdup_n_u8(0);
+                alpha_rgb_high = vset_lane_u8(vget_lane_u8(alpha_values, 2), alpha_rgb_high, 0); // B2
+                alpha_rgb_high = vset_lane_u8(vget_lane_u8(alpha_values, 3), alpha_rgb_high, 1); // R3
+                alpha_rgb_high = vset_lane_u8(vget_lane_u8(alpha_values, 3), alpha_rgb_high, 2); // G3
+                alpha_rgb_high = vset_lane_u8(vget_lane_u8(alpha_values, 3), alpha_rgb_high, 3); // B3
+                
+                // Convert to 16-bit for blending
+                uint16x8_t src_low16 = vmovl_u8(src_low);
+                uint16x8_t dst_low16 = vmovl_u8(dst_low);
+                uint16x8_t alpha_low16 = vmovl_u8(alpha_rgb_low);
+                uint16x8_t inv_alpha_low16 = vsubq_u16(vdupq_n_u16(255), alpha_low16);
+                
+                // Blend low part
+                uint16x8_t temp_low = vmulq_u16(src_low16, alpha_low16);
+                temp_low = vmlaq_u16(temp_low, dst_low16, inv_alpha_low16);
+                uint16x8_t div_low = vaddq_u16(temp_low, vshrq_n_u16(temp_low, 8));
+                uint16x8_t result_low16 = vshrq_n_u16(div_low, 8);
+                
+                // Convert high part (only first 4 bytes are valid)
+                uint16x8_t src_high16 = vmovl_u8(src_high);
+                uint16x8_t dst_high16 = vmovl_u8(dst_high);
+                uint16x8_t alpha_high16 = vmovl_u8(alpha_rgb_high);
+                uint16x8_t inv_alpha_high16 = vsubq_u16(vdupq_n_u16(255), alpha_high16);
+                
+                // Blend high part
+                uint16x8_t temp_high = vmulq_u16(src_high16, alpha_high16);
+                temp_high = vmlaq_u16(temp_high, dst_high16, inv_alpha_high16);
+                uint16x8_t div_high = vaddq_u16(temp_high, vshrq_n_u16(temp_high, 8));
+                uint16x8_t result_high16 = vshrq_n_u16(div_high, 8);
+                
+                // Pack back to 8-bit and store
+                uint8x8_t result_low = vqmovn_u16(result_low16);
+                uint8x8_t result_high = vqmovn_u16(result_high16);
+                
+                vst1_u8(dst + x * 3, result_low);
+                vst1_u8(dst + x * 3 + 8, result_high);
+        }
+        
+        // Handle remaining pixels with scalar code
+        alpha_blend_rgb_scalar(dst + x * 3, src + x * 3, alpha + x, width - x);
+}
+#endif
+
+/**
+ * Native RGB alpha blending
+ */
+void alpha_blend_rgb(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
+{
+#ifdef __AVX2__
+        alpha_blend_rgb_avx2(dst, src, alpha, width);
+#elif defined(__SSE2__)
+        alpha_blend_rgb_sse2(dst, src, alpha, width);
+#elif defined(__ARM_NEON)
+        alpha_blend_rgb_neon(dst, src, alpha, width);
+#else
+        alpha_blend_rgb_scalar(dst, src, alpha, width);
+#endif
 }
 
 /**

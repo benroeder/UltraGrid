@@ -353,6 +353,138 @@ static void benchmark_yuyv_blending()
     free(alpha);
 }
 
+static void test_rgb_blending()
+{
+    printf("\n=== Testing RGB Blending ===\n");
+    
+    // RGB format: R G B (3 bytes per pixel)
+    uint8_t dst[6] = {200, 100, 50, 200, 100, 50}; // Two bright pixels
+    uint8_t src[6] = {50, 150, 200, 50, 150, 200}; // Two dark/different pixels
+    uint8_t alpha[2] = {128, 192};                  // 50% and 75% alpha
+    
+    printf("Before blend - dst: R=%d G=%d B=%d | R=%d G=%d B=%d\n", 
+           dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
+    printf("Before blend - src: R=%d G=%d B=%d | R=%d G=%d B=%d\n", 
+           src[0], src[1], src[2], src[3], src[4], src[5]);
+    printf("Alpha values: %d, %d\n", alpha[0], alpha[1]);
+    
+    alpha_blend_rgb(dst, src, alpha, 2);
+    
+    printf("After blend  - dst: R=%d G=%d B=%d | R=%d G=%d B=%d\n", 
+           dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
+}
+
+static void test_rgb_optimized()
+{
+    printf("\n=== Testing RGB Optimized Blending ===\n");
+    printf("Implementation: %s\n", alpha_blend_get_implementation());
+    
+    // Test various widths to ensure SIMD and scalar paths work
+    int test_widths[] = {4, 6, 8, 12, 1920};
+    int num_widths = sizeof(test_widths) / sizeof(test_widths[0]);
+    
+    for (int w = 0; w < num_widths; w++) {
+        int width = test_widths[w];
+        int size = width * 3; // RGB is 3 bytes per pixel
+        
+        uint8_t *dst = malloc(size);
+        uint8_t *src = malloc(size);
+        uint8_t *alpha = malloc(width);
+        
+        if (!dst || !src || !alpha) {
+            printf("Memory allocation failed\n");
+            free(dst);
+            free(src);
+            free(alpha);
+            continue;
+        }
+        
+        // Initialize RGB data with known pattern
+        for (int x = 0; x < width; x++) {
+            // Destination: bright pixel (200, 100, 50)
+            dst[x*3 + 0] = 200;  // R
+            dst[x*3 + 1] = 100;  // G
+            dst[x*3 + 2] = 50;   // B
+            
+            // Source: different pixel (50, 150, 200)
+            src[x*3 + 0] = 50;   // R
+            src[x*3 + 1] = 150;  // G
+            src[x*3 + 2] = 200;  // B
+            
+            // Alpha: 50% blend
+            alpha[x] = 128;
+        }
+        
+        alpha_blend_rgb(dst, src, alpha, width);
+        
+        // Check first pixel results
+        uint8_t r = dst[0];
+        uint8_t g = dst[1];
+        uint8_t b = dst[2];
+        
+        // Expected for R: (50 * 128 + 200 * 127) / 255 ≈ 125
+        int expected_r = 125;
+        int diff_r = abs(r - expected_r);
+        
+        printf("Width %d: R=%d G=%d B=%d (R expected ~%d, got %d, diff=%d) %s\n", 
+               width, r, g, b, expected_r, r, diff_r, (diff_r <= 2) ? "✓" : "✗");
+        
+        free(dst);
+        free(src);
+        free(alpha);
+    }
+}
+
+static void benchmark_rgb_blending()
+{
+    printf("\n=== Benchmarking RGB Blending ===\n");
+    
+    const int width = 1920;
+    const int height = 1080;
+    const int iterations = 100;
+    const int rgb_size = width * height * 3; // 3 bytes per pixel
+    
+    uint8_t *dst = malloc(rgb_size);
+    uint8_t *src = malloc(rgb_size);
+    uint8_t *alpha = malloc(width * height);
+    
+    if (!dst || !src || !alpha) {
+        printf("Failed to allocate memory for benchmark\n");
+        free(dst);
+        free(src);
+        free(alpha);
+        return;
+    }
+    
+    // Initialize with random data
+    for (int i = 0; i < rgb_size; i++) {
+        dst[i] = rand() & 0xFF;
+        src[i] = rand() & 0xFF;
+    }
+    for (int i = 0; i < width * height; i++) {
+        alpha[i] = rand() & 0xFF;
+    }
+    
+    clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_rgb(dst + y * width * 3, src + y * width * 3, alpha + y * width, width);
+        }
+    }
+    
+    clock_t end = clock();
+    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    
+    printf("Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed);
+    printf("Average: %.3f ms per frame\n", elapsed * 1000.0 / iterations);
+    printf("Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed * 1000000.0));
+    
+    free(dst);
+    free(src);
+    free(alpha);
+}
+
 int main()
 {
     printf("Alpha Blending Test Program\n");
@@ -363,10 +495,13 @@ int main()
     test_uyvy_optimized();
     test_yuyv_blending();
     test_yuyv_optimized();
+    test_rgb_blending();
+    test_rgb_optimized();
     
     benchmark_rgba_blending();
     benchmark_uyvy_blending();
     benchmark_yuyv_blending();
+    benchmark_rgb_blending();
     
     return 0;
 }
