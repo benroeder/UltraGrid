@@ -12,6 +12,9 @@ position=<pos>      center, topleft, topright, bottomleft, bottomright
 x=<pixels>          Custom X position (negative = from right edge)
 y=<pixels>          Custom Y position (negative = from bottom edge)
 scale=<mode>        fit (default) or none
+edge=<width>        Soft edge width in pixels (0 = disabled)
+edge_type=<type>    Edge gradient: linear, gaussian, cosine
+edge_sides=<sides>  Which edges: all, left, right, top, bottom (comma-separated)
 perf                Enable performance stats
 
 EXAMPLES
@@ -30,6 +33,12 @@ uv -t testcard -p overlay:x=-100:y=-50 -d sdl
 
 # Performance monitoring
 uv -t testcard -p overlay:perf -d sdl
+
+# Soft edges (50px fade)
+uv -t testcard -p overlay:edge=50 -d sdl
+
+# Multiple overlays
+uv -t testcard -p overlay:file=logo.pam:position=topleft,overlay:file=watermark.pam:position=bottomright -d sdl
 
 CREATE PAM FILES
 ----------------
@@ -55,6 +64,8 @@ FEATURES
 ✓ Automatic scaling to video resolution
 ✓ Flexible positioning
 ✓ Performance monitoring
+✓ Soft edge blending (linear, gaussian, cosine gradients)
+✓ Multiple overlays via comma-separated configurations
 
 TIPS
 ----
@@ -62,6 +73,8 @@ TIPS
 • Use alpha channel for smooth edges
 • Files can be updated while running
 • Enable 'perf' to check impact
+• Soft edges affect the overlay image borders - not recommended for logos with scale=fit
+• For logo fades, use alpha transparency in the image itself
 
 DEBUG LOGGING
 -------------

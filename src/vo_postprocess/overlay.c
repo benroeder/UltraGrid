@@ -187,6 +187,7 @@ static void print_help() {
         color_printf(" - Uses alpha channel for transparency\n");
         color_printf(" - Negative X/Y values position from right/bottom edges\n");
         color_printf(" - Soft edges create a gradual transparency transition at overlay borders\n");
+        color_printf(" - Soft edges are applied to the overlay image edges, not recommended for logos with scale=fit\n");
 }
 
 static const char *edge_type_to_string(enum edge_type type) {
