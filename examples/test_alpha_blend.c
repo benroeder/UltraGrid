@@ -82,6 +82,25 @@ static void alpha_blend_i420_scalar(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst
                                     const uint8_t *alpha, int width, int height);
 static void alpha_blend_y416_scalar(uint8_t *dst, const uint8_t *src, int width);
 
+// Helper function to print frame rates for different resolutions
+static void print_resolution_frame_rates(double fps)
+{
+    // Calculate frame rates for different resolutions based on 1920x1080 reference
+    double hd_pixels = 1920.0 * 1080.0;           // HD (1920x1080)
+    double uhd_2k_pixels = 2560.0 * 1440.0;       // 2K UHD (2560x1440)
+    double uhd_4k_pixels = 3840.0 * 2160.0;       // UHD 4K (3840x2160)
+    double cinema_4k_pixels = 4096.0 * 2160.0;    // Cinematic 4K (4096x2160)
+    double uhd_8k_pixels = 7680.0 * 4320.0;       // 8K UHD (7680x4320)
+    
+    double fps_2k = fps * (hd_pixels / uhd_2k_pixels);
+    double fps_uhd4k = fps * (hd_pixels / uhd_4k_pixels);
+    double fps_cinema4k = fps * (hd_pixels / cinema_4k_pixels);
+    double fps_8k = fps * (hd_pixels / uhd_8k_pixels);
+    
+    printf("  Frame rate: %.1f HD fps, %.1f 2K fps, %.1f UHD 4K fps, %.1f Cinema 4K fps, %.1f 8K fps\n", 
+           fps, fps_2k, fps_uhd4k, fps_cinema4k, fps_8k);
+}
+
 // Scalar implementations for testing
 static void alpha_blend_rgba_scalar(uint8_t *dst, const uint8_t *src, int width)
 {
@@ -351,7 +370,7 @@ static void benchmark_rgba_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
     printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (pixels * iterations) / (elapsed_scalar * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    print_resolution_frame_rates(fps_scalar);
     
     // Reset data for optimized test
     for (int i = 0; i < pixels * 4; i++) {
@@ -373,7 +392,7 @@ static void benchmark_rgba_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
     printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (pixels * iterations) / (elapsed_opt * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    print_resolution_frame_rates(fps_opt);
     printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
@@ -489,7 +508,7 @@ static void benchmark_uyvy_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
     printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    print_resolution_frame_rates(fps_scalar);
     
     // Reset data for optimized test
     for (int i = 0; i < uyvy_size; i++) {
@@ -513,7 +532,7 @@ static void benchmark_uyvy_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
     printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    print_resolution_frame_rates(fps_opt);
     printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
@@ -655,7 +674,7 @@ static void benchmark_yuyv_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
     printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    print_resolution_frame_rates(fps_scalar);
     
     // Reset data for optimized test
     for (int i = 0; i < yuyv_size; i++) {
@@ -679,7 +698,7 @@ static void benchmark_yuyv_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
     printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    print_resolution_frame_rates(fps_opt);
     printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
@@ -820,7 +839,7 @@ static void benchmark_rgb_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
     printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    print_resolution_frame_rates(fps_scalar);
     
     // Reset data for optimized test
     for (int i = 0; i < rgb_size; i++) {
@@ -844,7 +863,7 @@ static void benchmark_rgb_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
     printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    print_resolution_frame_rates(fps_opt);
     printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
@@ -954,7 +973,7 @@ static void benchmark_v210_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
     printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    print_resolution_frame_rates(fps_scalar);
     
     // Reset data for optimized test
     for (int i = 0; i < v210_size; i++) {
@@ -980,7 +999,7 @@ static void benchmark_v210_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
     printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    print_resolution_frame_rates(fps_opt);
     printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
@@ -1089,7 +1108,7 @@ static void benchmark_r10k_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
     printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    print_resolution_frame_rates(fps_scalar);
     
     // Reset data for optimized test
     for (int i = 0; i < r10k_size; i++) {
@@ -1115,7 +1134,7 @@ static void benchmark_r10k_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
     printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    print_resolution_frame_rates(fps_opt);
     printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
@@ -1289,7 +1308,7 @@ static void benchmark_i420_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
     printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    print_resolution_frame_rates(fps_scalar);
     
     // Reset data for optimized test
     for (int i = 0; i < y_size; i++) {
@@ -1315,7 +1334,7 @@ static void benchmark_i420_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
     printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    print_resolution_frame_rates(fps_opt);
     printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst_y); free(dst_u); free(dst_v);
@@ -1447,7 +1466,7 @@ static void benchmark_y416_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
     printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    print_resolution_frame_rates(fps_scalar);
     
     // Reset data for optimized test
     for (int i = 0; i < y416_size; i++) {
@@ -1469,7 +1488,7 @@ static void benchmark_y416_blending()
     printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
     printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
     printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
-    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    print_resolution_frame_rates(fps_opt);
     printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
     
     free(dst);
