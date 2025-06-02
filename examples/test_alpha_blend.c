@@ -1496,11 +1496,79 @@ static void benchmark_y416_blending()
     free(dst_copy);
 }
 
+// Multi-resolution benchmark
+static void benchmark_multi_resolution()
+{
+    typedef struct {
+        const char *name;
+        int width;
+        int height;
+    } resolution_t;
+    
+    const resolution_t resolutions[] = {
+        {"HD 720p", 1280, 720},
+        {"HD 1080p", 1920, 1080},
+        {"UHD 4K", 3840, 2160},
+        {"8K", 7680, 4320}
+    };
+    
+    printf("\n=== Multi-Resolution Benchmark (RGBA) ===\n");
+    printf("Resolution    Pixels       Time/Frame   Throughput   Frame Rate             Bandwidth\n");
+    printf("----------------------------------------------------------------------------------------------------\n");
+    
+    for (size_t i = 0; i < sizeof(resolutions) / sizeof(resolutions[0]); i++) {
+        const int width = resolutions[i].width;
+        const int height = resolutions[i].height;
+        const int pixels = width * height;
+        const int iterations = (pixels > 10000000) ? 10 : 50; // Fewer iterations for 4K/8K
+        
+        uint8_t *dst = malloc(pixels * 4);
+        uint8_t *src = malloc(pixels * 4);
+        
+        if (!dst || !src) {
+            printf("%-12s  Memory allocation failed\n", resolutions[i].name);
+            free(dst);
+            free(src);
+            continue;
+        }
+        
+        // Initialize with random data
+        for (int j = 0; j < pixels * 4; j++) {
+            dst[j] = rand() & 0xFF;
+            src[j] = rand() & 0xFF;
+        }
+        
+        // Warm up
+        alpha_blend_rgba(dst, src, pixels);
+        
+        // Benchmark
+        clock_t start = clock();
+        for (int j = 0; j < iterations; j++) {
+            alpha_blend_rgba(dst, src, pixels);
+        }
+        clock_t end = clock();
+        double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+        
+        double ms_per_frame = (elapsed * 1000.0) / iterations;
+        double fps = 1000.0 / ms_per_frame;
+        double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+        double bandwidth_gb_per_sec = (pixels * iterations * 8.0) / (elapsed * 1e9);
+        
+        printf("%-12s  %4dx%-4d   %6.2f ms    %7.1f MP/s  %7.1f fps            %5.1f GB/s\n", 
+               resolutions[i].name, width, height, ms_per_frame, 
+               megapixels_per_sec, fps, bandwidth_gb_per_sec);
+        
+        free(dst);
+        free(src);
+    }
+}
+
 int main()
 {
     printf("Alpha Blending Test Program\n");
     printf("===========================\n");
     
+    // Run all correctness tests
     test_rgba_blending();
     test_uyvy_blending();
     test_uyvy_optimized();
@@ -1513,6 +1581,7 @@ int main()
     test_i420_blending();
     test_y416_blending();
     
+    // Run all benchmarks at 1920x1080
     benchmark_rgba_blending();
     benchmark_uyvy_blending();
     benchmark_yuyv_blending();
@@ -1521,6 +1590,9 @@ int main()
     benchmark_r10k_blending();
     benchmark_i420_blending();
     benchmark_y416_blending();
+    
+    // Run multi-resolution benchmark
+    benchmark_multi_resolution();
     
     return 0;
 }
