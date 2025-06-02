@@ -752,10 +752,148 @@ skip_scaling:
         bool used_native_blend = false;
         if (out->color_spec == UYVY || out->color_spec == YUYV || out->color_spec == RGB || 
             out->color_spec == v210 || out->color_spec == R10k || 
-            out->color_spec == R12L || out->color_spec == RGBA || out->color_spec == Y416) {
+            out->color_spec == R12L || out->color_spec == RGBA || out->color_spec == Y416 ||
+            out->color_spec == I420) {
                 used_native_blend = true;
         }
         
+        // Handle I420 separately since it's planar
+        if (out->color_spec == I420) {
+                // I420 is planar: Y plane (full res), U plane (half res), V plane (half res)
+                int y_width = out->tiles[0].width;
+                int y_height = out->tiles[0].height;
+                int uv_width = y_width / 2;
+                int uv_height = y_height / 2;
+                
+                // Calculate plane offsets
+                unsigned char *y_plane = (unsigned char *)out->tiles[0].data;
+                unsigned char *u_plane = y_plane + (y_width * y_height);
+                unsigned char *v_plane = u_plane + (uv_width * uv_height);
+                
+                // Allocate buffers for converted overlay
+                size_t overlay_y_size = actual_overlay_width * actual_overlay_height;
+                size_t overlay_uv_size = (actual_overlay_width / 2) * (actual_overlay_height / 2);
+                unsigned char *overlay_y = malloc(overlay_y_size);
+                unsigned char *overlay_u = malloc(overlay_uv_size);
+                unsigned char *overlay_v = malloc(overlay_uv_size);
+                unsigned char *alpha_full = malloc(overlay_y_size);
+                
+                if (!overlay_y || !overlay_u || !overlay_v || !alpha_full) {
+                        log_msg(LOG_LEVEL_ERROR, MOD_NAME "Failed to allocate I420 buffers\n");
+                        free(overlay_y);
+                        free(overlay_u);
+                        free(overlay_v);
+                        free(alpha_full);
+                        goto skip_i420;
+                }
+                
+                // Convert RGBA overlay to I420 and extract alpha
+                decoder_t rgba_to_i420 = get_decoder_from_to(RGBA, I420);
+                if (!rgba_to_i420) {
+                        log_msg(LOG_LEVEL_ERROR, MOD_NAME "No RGBA to I420 converter available\n");
+                        free(overlay_y);
+                        free(overlay_u);
+                        free(overlay_v);
+                        free(alpha_full);
+                        goto skip_i420;
+                }
+                
+                // Extract alpha channel to full resolution buffer
+                for (int y = 0; y < actual_overlay_height; y++) {
+                        const unsigned char *overlay_line = overlay_to_use + y * overlay_stride_width * 4;
+                        for (int x = 0; x < actual_overlay_width; x++) {
+                                alpha_full[y * actual_overlay_width + x] = overlay_line[x * 4 + 3];
+                        }
+                }
+                
+                // Convert overlay to I420
+                struct video_frame src_frame, dst_frame;
+                src_frame.tiles[0].data = (char *)overlay_to_use;
+                src_frame.tiles[0].width = actual_overlay_width;
+                src_frame.tiles[0].height = actual_overlay_height;
+                src_frame.color_spec = RGBA;
+                
+                dst_frame.tiles[0].data = (char *)overlay_y;
+                dst_frame.tiles[0].width = actual_overlay_width;
+                dst_frame.tiles[0].height = actual_overlay_height;
+                dst_frame.color_spec = I420;
+                
+                rgba_to_i420((unsigned char *)dst_frame.tiles[0].data, 
+                            (unsigned char *)src_frame.tiles[0].data,
+                            vc_get_datalen(actual_overlay_width, actual_overlay_height, I420),
+                            0, 0, 0);
+                
+                // Set up plane pointers for converted overlay
+                unsigned char *conv_y_plane = overlay_y;
+                unsigned char *conv_u_plane = overlay_y + overlay_y_size;
+                unsigned char *conv_v_plane = conv_u_plane + overlay_uv_size;
+                
+                // We need to blend the overlay into the video frame at the correct position
+                // For I420, we need to handle the fact that it's planar with different resolutions
+                
+                // Blend Y plane line by line
+                for (int y = 0; y < actual_overlay_height; y++) {
+                        if (pos_y + y >= 0 && pos_y + y < y_height) {
+                                unsigned char *dst_y_line = y_plane + (pos_y + y) * y_width + pos_x;
+                                unsigned char *src_y_line = conv_y_plane + y * actual_overlay_width;
+                                unsigned char *alpha_line = alpha_full + y * actual_overlay_width;
+                                
+                                // Blend this line
+                                for (int x = 0; x < actual_overlay_width; x++) {
+                                        if (pos_x + x >= 0 && pos_x + x < y_width) {
+                                                uint8_t a = alpha_line[x];
+                                                dst_y_line[x] = (src_y_line[x] * a + dst_y_line[x] * (255 - a)) / 255;
+                                        }
+                                }
+                        }
+                }
+                
+                // Blend U and V planes (half resolution)
+                int uv_pos_x = pos_x / 2;
+                int uv_pos_y = pos_y / 2;
+                int uv_overlay_width = actual_overlay_width / 2;
+                int uv_overlay_height = actual_overlay_height / 2;
+                
+                for (int y = 0; y < uv_overlay_height; y++) {
+                        if (uv_pos_y + y >= 0 && uv_pos_y + y < uv_height) {
+                                unsigned char *dst_u_line = u_plane + (uv_pos_y + y) * uv_width + uv_pos_x;
+                                unsigned char *dst_v_line = v_plane + (uv_pos_y + y) * uv_width + uv_pos_x;
+                                unsigned char *src_u_line = conv_u_plane + y * uv_overlay_width;
+                                unsigned char *src_v_line = conv_v_plane + y * uv_overlay_width;
+                                
+                                // For chroma, we need to average the alpha values from the corresponding 2x2 block
+                                for (int x = 0; x < uv_overlay_width; x++) {
+                                        if (uv_pos_x + x >= 0 && uv_pos_x + x < uv_width) {
+                                                // Average alpha from 2x2 block
+                                                int y2 = y * 2;
+                                                int x2 = x * 2;
+                                                uint16_t a00 = alpha_full[y2 * actual_overlay_width + x2];
+                                                uint16_t a01 = (x2 + 1 < actual_overlay_width) ? 
+                                                               alpha_full[y2 * actual_overlay_width + x2 + 1] : a00;
+                                                uint16_t a10 = (y2 + 1 < actual_overlay_height) ? 
+                                                               alpha_full[(y2 + 1) * actual_overlay_width + x2] : a00;
+                                                uint16_t a11 = ((x2 + 1 < actual_overlay_width) && (y2 + 1 < actual_overlay_height)) ? 
+                                                               alpha_full[(y2 + 1) * actual_overlay_width + x2 + 1] : a00;
+                                                
+                                                uint8_t avg_alpha = (a00 + a01 + a10 + a11) / 4;
+                                                
+                                                // Blend chroma
+                                                dst_u_line[x] = (src_u_line[x] * avg_alpha + dst_u_line[x] * (255 - avg_alpha)) / 255;
+                                                dst_v_line[x] = (src_v_line[x] * avg_alpha + dst_v_line[x] * (255 - avg_alpha)) / 255;
+                                        }
+                                }
+                        }
+                }
+                
+                free(overlay_y);
+                free(overlay_u);
+                free(overlay_v);
+                free(alpha_full);
+                
+                goto skip_line_processing;
+        }
+        
+skip_i420:
         for (int y = 0; y < actual_overlay_height; ++y) {
                 unsigned char *video_line = (unsigned char *)(out->tiles[0].data + 
                         (y + pos_y) * vc_get_linesize(out->tiles[0].width, out->color_spec) +
@@ -1057,6 +1195,7 @@ skip_scaling:
                 }
         }
         
+skip_line_processing:
         if (s->perf.enabled) {
                 s->perf.blend_time_ns += get_time_in_ns() - blend_start;
                 if (used_native_blend) {

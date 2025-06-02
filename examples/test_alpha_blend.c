@@ -1690,6 +1690,207 @@ static void benchmark_y416_blending()
     free(dst_copy);
 }
 
+// Multi-format benchmark at 1920x1080
+static void benchmark_multi_format()
+{
+    printf("\n=== Multi-Format Benchmark (1920x1080) ===\n");
+    printf("Format       Pixels/Format  Time/Frame   Throughput   Frame Rate\n");
+    printf("----------------------------------------------------------------------\n");
+    
+    const int width = 1920;
+    const int height = 1080;
+    const int pixels = width * height;
+    const int iterations = 100;
+    
+    // Test RGBA
+    {
+        uint8_t *dst = malloc(pixels * 4);
+        uint8_t *src = malloc(pixels * 4);
+        
+        if (dst && src) {
+            for (int i = 0; i < pixels * 4; i++) {
+                dst[i] = rand() & 0xFF;
+                src[i] = rand() & 0xFF;
+            }
+            
+            clock_t start = clock();
+            for (int i = 0; i < iterations; i++) {
+                alpha_blend_rgba(dst, src, pixels);
+            }
+            clock_t end = clock();
+            double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+            
+            double ms_per_frame = (elapsed * 1000.0) / iterations;
+            double fps = 1000.0 / ms_per_frame;
+            double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+            
+            printf("%-12s %dx%d RGBA  %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
+                   "RGBA", width, height, ms_per_frame, megapixels_per_sec, fps);
+        }
+        free(dst);
+        free(src);
+    }
+    
+    // Test UYVY
+    {
+        int uyvy_size = pixels * 2;
+        uint8_t *dst = malloc(uyvy_size);
+        uint8_t *src = malloc(uyvy_size);
+        uint8_t *alpha = malloc(pixels);
+        
+        if (dst && src && alpha) {
+            for (int i = 0; i < uyvy_size; i++) {
+                dst[i] = rand() & 0xFF;
+                src[i] = rand() & 0xFF;
+            }
+            for (int i = 0; i < pixels; i++) {
+                alpha[i] = rand() & 0xFF;
+            }
+            
+            clock_t start = clock();
+            for (int iter = 0; iter < iterations; iter++) {
+                for (int y = 0; y < height; y++) {
+                    alpha_blend_uyvy(dst + y * width * 2, src + y * width * 2, alpha + y * width, width);
+                }
+            }
+            clock_t end = clock();
+            double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+            
+            double ms_per_frame = (elapsed * 1000.0) / iterations;
+            double fps = 1000.0 / ms_per_frame;
+            double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+            
+            printf("%-12s %dx%d UYVY  %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
+                   "UYVY", width, height, ms_per_frame, megapixels_per_sec, fps);
+        }
+        free(dst);
+        free(src);
+        free(alpha);
+    }
+    
+    // Test RGB
+    {
+        int rgb_size = pixels * 3;
+        uint8_t *dst = malloc(rgb_size);
+        uint8_t *src = malloc(rgb_size);
+        uint8_t *alpha = malloc(pixels);
+        
+        if (dst && src && alpha) {
+            for (int i = 0; i < rgb_size; i++) {
+                dst[i] = rand() & 0xFF;
+                src[i] = rand() & 0xFF;
+            }
+            for (int i = 0; i < pixels; i++) {
+                alpha[i] = rand() & 0xFF;
+            }
+            
+            clock_t start = clock();
+            for (int iter = 0; iter < iterations; iter++) {
+                for (int y = 0; y < height; y++) {
+                    alpha_blend_rgb(dst + y * width * 3, src + y * width * 3, alpha + y * width, width);
+                }
+            }
+            clock_t end = clock();
+            double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+            
+            double ms_per_frame = (elapsed * 1000.0) / iterations;
+            double fps = 1000.0 / ms_per_frame;
+            double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+            
+            printf("%-12s %dx%d RGB   %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
+                   "RGB", width, height, ms_per_frame, megapixels_per_sec, fps);
+        }
+        free(dst);
+        free(src);
+        free(alpha);
+    }
+    
+    // Test I420
+    {
+        int y_size = pixels;
+        int chroma_size = pixels / 4;
+        uint8_t *dst_y = malloc(y_size);
+        uint8_t *dst_u = malloc(chroma_size);
+        uint8_t *dst_v = malloc(chroma_size);
+        uint8_t *src_y = malloc(y_size);
+        uint8_t *src_u = malloc(chroma_size);
+        uint8_t *src_v = malloc(chroma_size);
+        uint8_t *alpha = malloc(y_size);
+        
+        if (dst_y && dst_u && dst_v && src_y && src_u && src_v && alpha) {
+            for (int i = 0; i < y_size; i++) {
+                dst_y[i] = rand() & 0xFF;
+                src_y[i] = rand() & 0xFF;
+                alpha[i] = rand() & 0xFF;
+            }
+            for (int i = 0; i < chroma_size; i++) {
+                dst_u[i] = rand() & 0xFF;
+                dst_v[i] = rand() & 0xFF;
+                src_u[i] = rand() & 0xFF;
+                src_v[i] = rand() & 0xFF;
+            }
+            
+            clock_t start = clock();
+            for (int i = 0; i < iterations; i++) {
+                alpha_blend_i420(dst_y, dst_u, dst_v, src_y, src_u, src_v, alpha, width, height);
+            }
+            clock_t end = clock();
+            double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+            
+            double ms_per_frame = (elapsed * 1000.0) / iterations;
+            double fps = 1000.0 / ms_per_frame;
+            double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+            
+            printf("%-12s %dx%d I420  %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
+                   "I420", width, height, ms_per_frame, megapixels_per_sec, fps);
+        }
+        free(dst_y); free(dst_u); free(dst_v);
+        free(src_y); free(src_u); free(src_v);
+        free(alpha);
+    }
+    
+    // Test v210
+    {
+        int v210_size = (width / 6) * 16 * height;
+        uint8_t *dst = malloc(v210_size);
+        uint8_t *src = malloc(v210_size);
+        uint8_t *alpha = malloc(pixels);
+        
+        if (dst && src && alpha) {
+            for (int i = 0; i < v210_size; i++) {
+                dst[i] = rand() & 0xFF;
+                src[i] = rand() & 0xFF;
+            }
+            for (int i = 0; i < pixels; i++) {
+                alpha[i] = rand() & 0xFF;
+            }
+            
+            clock_t start = clock();
+            for (int iter = 0; iter < iterations; iter++) {
+                for (int y = 0; y < height; y++) {
+                    alpha_blend_v210(dst + y * (width / 6) * 16, 
+                                   src + y * (width / 6) * 16, 
+                                   alpha + y * width, width);
+                }
+            }
+            clock_t end = clock();
+            double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+            
+            double ms_per_frame = (elapsed * 1000.0) / iterations;
+            double fps = 1000.0 / ms_per_frame;
+            double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+            
+            printf("%-12s %dx%d v210  %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
+                   "v210", width, height, ms_per_frame, megapixels_per_sec, fps);
+        }
+        free(dst);
+        free(src);
+        free(alpha);
+    }
+    
+    printf("\nNote: I420 has lower bandwidth requirements due to 4:2:0 chroma subsampling\n");
+}
+
 // Multi-resolution benchmark
 static void benchmark_multi_resolution()
 {
@@ -1789,6 +1990,9 @@ int main()
     
     // Run multi-resolution benchmark
     benchmark_multi_resolution();
+    
+    // Run multi-format benchmark
+    benchmark_multi_format();
     
     return 0;
 }
