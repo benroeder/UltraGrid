@@ -80,6 +80,7 @@ static void alpha_blend_r10k_scalar(uint8_t *dst, const uint8_t *src, const uint
 static void alpha_blend_i420_scalar(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
                                     const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
                                     const uint8_t *alpha, int width, int height);
+static void alpha_blend_y416_scalar(uint8_t *dst, const uint8_t *src, int width);
 
 // Scalar implementations for testing
 static void alpha_blend_rgba_scalar(uint8_t *dst, const uint8_t *src, int width)
@@ -1323,6 +1324,159 @@ static void benchmark_i420_blending()
     free(alpha);
 }
 
+static void alpha_blend_y416_scalar(uint8_t *dst, const uint8_t *src, int width)
+{
+        uint16_t *dst16 = (uint16_t *)dst;
+        const uint16_t *src16 = (const uint16_t *)src;
+        
+        for (int x = 0; x < width; x++) {
+                // Extract components (little-endian 16-bit)
+                uint16_t u_src = src16[0];
+                uint16_t y_src = src16[1];
+                uint16_t v_src = src16[2];
+                uint16_t a_src = src16[3];
+                
+                uint16_t u_dst = dst16[0];
+                uint16_t y_dst = dst16[1];
+                uint16_t v_dst = dst16[2];
+                
+                // Convert 16-bit alpha to 0-65535 range for blending
+                uint32_t inv_alpha = 65535 - a_src;
+                
+                // Blend components
+                dst16[0] = (uint16_t)(((uint32_t)u_src * a_src + (uint32_t)u_dst * inv_alpha) / 65535);
+                dst16[1] = (uint16_t)(((uint32_t)y_src * a_src + (uint32_t)y_dst * inv_alpha) / 65535);
+                dst16[2] = (uint16_t)(((uint32_t)v_src * a_src + (uint32_t)v_dst * inv_alpha) / 65535);
+                dst16[3] = 65535;
+                
+                dst16 += 4;
+                src16 += 4;
+        }
+}
+
+static void test_y416_blending()
+{
+    printf("\n=== Testing Y416 Blending ===\n");
+    
+    // Y416 format: 8 bytes per pixel (4 × 16-bit components)
+    uint8_t dst[16] = {0}; // 2 pixels
+    uint8_t src[16] = {0};
+    
+    // Initialize Y416 data (little-endian)
+    uint16_t *dst16 = (uint16_t*)dst;
+    uint16_t *src16 = (uint16_t*)src;
+    
+    // Destination: bright pixel (Y=60000, U=V=32768 neutral, A=65535)
+    dst16[0] = 32768;  // U
+    dst16[1] = 60000;  // Y (bright)
+    dst16[2] = 32768;  // V  
+    dst16[3] = 65535;  // A (unused in blending)
+    
+    dst16[4] = 32768;  // U
+    dst16[5] = 60000;  // Y
+    dst16[6] = 32768;  // V
+    dst16[7] = 65535;  // A
+    
+    // Source: dark pixel with 50% alpha (Y=4000, U=V=32768, A=32768)
+    src16[0] = 32768;  // U
+    src16[1] = 4000;   // Y (dark)
+    src16[2] = 32768;  // V
+    src16[3] = 32768;  // A (50% in 16-bit = ~32768)
+    
+    src16[4] = 32768;  // U
+    src16[5] = 4000;   // Y
+    src16[6] = 32768;  // V
+    src16[7] = 49152;  // A (75% in 16-bit = ~49152)
+    
+    printf("Before blend - dst Y[0]=%d A[0]=%d\n", dst16[1], dst16[3]);
+    printf("Before blend - src Y[0]=%d A[0]=%d\n", src16[1], src16[3]);
+    
+    alpha_blend_y416(dst, src, 2);
+    
+    printf("After blend  - dst Y[0]=%d A[0]=%d\n", dst16[1], dst16[3]);
+    
+    // Expected Y: (4000 * 32768 + 60000 * 32767) / 65535 ≈ 32000
+    uint32_t expected_calc = 4000 * 32768 + 60000 * 32767;
+    uint16_t expected_y = expected_calc / 65535;
+    int diff_y = abs(dst16[1] - expected_y);
+    
+    printf("Expected Y ~%d, got %d, diff=%d %s\n", expected_y, dst16[1], diff_y, (diff_y <= 100) ? "✓" : "✗");
+    printf("Expected A=65535, got %d %s\n", dst16[3], (dst16[3] == 65535) ? "✓" : "✗");
+}
+
+static void benchmark_y416_blending()
+{
+    printf("\n=== Benchmarking Y416 Blending ===\n");
+    
+    const int width = 1920;
+    const int height = 1080;
+    const int iterations = 100;
+    const int y416_size = width * height * 8; // 8 bytes per pixel
+    
+    uint8_t *dst = malloc(y416_size);
+    uint8_t *src = malloc(y416_size);
+    uint8_t *dst_copy = malloc(y416_size);
+    
+    if (!dst || !src || !dst_copy) {
+        printf("Failed to allocate memory for benchmark\n");
+        free(dst);
+        free(src);
+        free(dst_copy);
+        return;
+    }
+    
+    // Initialize with random data
+    for (int i = 0; i < y416_size; i++) {
+        dst[i] = rand() & 0xFF;
+        src[i] = rand() & 0xFF;
+        dst_copy[i] = dst[i];
+    }
+    
+    // Test scalar implementation
+    printf("Scalar:\n");
+    clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        alpha_blend_y416_scalar(dst_copy, src, width * height);
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < y416_size; i++) {
+        dst[i] = dst_copy[i];
+    }
+    
+    // Test optimized implementation
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        alpha_blend_y416(dst, src, width * height);
+    }
+    
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
+    
+    free(dst);
+    free(src);
+    free(dst_copy);
+}
+
 int main()
 {
     printf("Alpha Blending Test Program\n");
@@ -1338,6 +1492,7 @@ int main()
     test_v210_blending();
     test_r10k_blending();
     test_i420_blending();
+    test_y416_blending();
     
     benchmark_rgba_blending();
     benchmark_uyvy_blending();
@@ -1346,6 +1501,7 @@ int main()
     benchmark_v210_blending();
     benchmark_r10k_blending();
     benchmark_i420_blending();
+    benchmark_y416_blending();
     
     return 0;
 }

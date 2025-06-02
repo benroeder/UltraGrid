@@ -2519,12 +2519,274 @@ void alpha_blend_i420(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
 #endif
 }
 
+#ifdef __AVX2__
+static void alpha_blend_y416_avx2(uint8_t *dst, const uint8_t *src, int width)
+{
+        uint16_t *dst16 = (uint16_t *)dst;
+        const uint16_t *src16 = (const uint16_t *)src;
+        
+        int x = 0;
+        // Process 4 pixels at a time with AVX2 (4 pixels = 16 × 16-bit components)
+        for (; x <= width - 4; x += 4) {
+                // Load 4 Y416 pixels (16 × 16-bit values)
+                __m256i src_vec = _mm256_loadu_si256((__m256i*)(src16 + x * 4));
+                __m256i dst_vec = _mm256_loadu_si256((__m256i*)(dst16 + x * 4));
+                
+                // Extract alpha channel (every 4th component)
+                __m128i alpha_low = _mm256_extracti128_si256(src_vec, 0);
+                __m128i alpha_high = _mm256_extracti128_si256(src_vec, 1);
+                __m128i alpha_extracted = _mm_blend_epi16(
+                        _mm_srli_si128(alpha_low, 6),   // Get alpha from first 2 pixels
+                        _mm_slli_si128(_mm_srli_si128(alpha_high, 6), 4), 0xCC // Get alpha from last 2 pixels
+                );
+                
+                // Duplicate alphas for each component: AAAA BBBB CCCC DDDD
+                __m256i alpha_vec = _mm256_permute4x64_epi64(_mm256_castsi128_si256(alpha_extracted), 0x50);
+                alpha_vec = _mm256_shuffle_epi32(alpha_vec, 0x50); // Replicate each alpha 4 times
+                
+                // Calculate inv_alpha = 65535 - alpha
+                __m256i inv_alpha_vec = _mm256_sub_epi16(_mm256_set1_epi16(65535), alpha_vec);
+                
+                // Convert to 32-bit for multiplication to avoid overflow
+                __m256i src_lo = _mm256_unpacklo_epi16(src_vec, _mm256_setzero_si256());
+                __m256i src_hi = _mm256_unpackhi_epi16(src_vec, _mm256_setzero_si256());
+                __m256i dst_lo = _mm256_unpacklo_epi16(dst_vec, _mm256_setzero_si256());
+                __m256i dst_hi = _mm256_unpackhi_epi16(dst_vec, _mm256_setzero_si256());
+                __m256i alpha_lo = _mm256_unpacklo_epi16(alpha_vec, _mm256_setzero_si256());
+                __m256i alpha_hi = _mm256_unpackhi_epi16(alpha_vec, _mm256_setzero_si256());
+                __m256i inv_alpha_lo = _mm256_unpacklo_epi16(inv_alpha_vec, _mm256_setzero_si256());
+                __m256i inv_alpha_hi = _mm256_unpackhi_epi16(inv_alpha_vec, _mm256_setzero_si256());
+                
+                // Blend: result = (src * alpha + dst * inv_alpha) / 65535
+                __m256i blend_lo = _mm256_add_epi32(_mm256_mullo_epi32(src_lo, alpha_lo),
+                                                  _mm256_mullo_epi32(dst_lo, inv_alpha_lo));
+                __m256i blend_hi = _mm256_add_epi32(_mm256_mullo_epi32(src_hi, alpha_hi),
+                                                  _mm256_mullo_epi32(dst_hi, inv_alpha_hi));
+                
+                // Divide by 65535 using approximation: (x + (x >> 16)) >> 16
+                blend_lo = _mm256_add_epi32(blend_lo, _mm256_srli_epi32(blend_lo, 16));
+                blend_hi = _mm256_add_epi32(blend_hi, _mm256_srli_epi32(blend_hi, 16));
+                blend_lo = _mm256_srli_epi32(blend_lo, 16);
+                blend_hi = _mm256_srli_epi32(blend_hi, 16);
+                
+                // Pack back to 16-bit
+                __m256i result = _mm256_packus_epi32(blend_lo, blend_hi);
+                
+                // Set alpha channel to 65535 for all pixels
+                __m256i alpha_mask = _mm256_set_epi16(0xFFFF, 0, 0, 0, 0xFFFF, 0, 0, 0,
+                                                    0xFFFF, 0, 0, 0, 0xFFFF, 0, 0, 0);
+                result = _mm256_or_si256(_mm256_andnot_si256(alpha_mask, result),
+                                       _mm256_and_si256(alpha_mask, _mm256_set1_epi16(65535)));
+                
+                _mm256_storeu_si256((__m256i*)(dst16 + x * 4), result);
+        }
+        
+        // Handle remaining pixels
+        for (; x < width; x++) {
+                uint16_t u_src = src16[0];
+                uint16_t y_src = src16[1];
+                uint16_t v_src = src16[2];
+                uint16_t a_src = src16[3];
+                
+                uint16_t u_dst = dst16[0];
+                uint16_t y_dst = dst16[1];
+                uint16_t v_dst = dst16[2];
+                
+                uint32_t inv_alpha = 65535 - a_src;
+                
+                dst16[0] = (uint16_t)(((uint32_t)u_src * a_src + (uint32_t)u_dst * inv_alpha) / 65535);
+                dst16[1] = (uint16_t)(((uint32_t)y_src * a_src + (uint32_t)y_dst * inv_alpha) / 65535);
+                dst16[2] = (uint16_t)(((uint32_t)v_src * a_src + (uint32_t)v_dst * inv_alpha) / 65535);
+                dst16[3] = 65535;
+                
+                dst16 += 4;
+                src16 += 4;
+        }
+}
+#endif
+
+#ifdef __SSE2__
+static void alpha_blend_y416_sse2(uint8_t *dst, const uint8_t *src, int width)
+{
+        uint16_t *dst16 = (uint16_t *)dst;
+        const uint16_t *src16 = (const uint16_t *)src;
+        
+        int x = 0;
+        // Process 2 pixels at a time with SSE2 (2 pixels = 8 × 16-bit components)
+        for (; x <= width - 2; x += 2) {
+                // Load 2 Y416 pixels (8 × 16-bit values)
+                __m128i src_vec = _mm_loadu_si128((__m128i*)(src16 + x * 4));
+                __m128i dst_vec = _mm_loadu_si128((__m128i*)(dst16 + x * 4));
+                
+                // Extract alpha channels (positions 3 and 7)
+                __m128i alpha_extracted = _mm_set_epi16(
+                        _mm_extract_epi16(src_vec, 7),  // Alpha of pixel 1
+                        _mm_extract_epi16(src_vec, 7),  // Alpha of pixel 1 (duplicate)
+                        _mm_extract_epi16(src_vec, 7),  // Alpha of pixel 1 (duplicate)
+                        _mm_extract_epi16(src_vec, 7),  // Alpha of pixel 1 (duplicate)
+                        _mm_extract_epi16(src_vec, 3),  // Alpha of pixel 0
+                        _mm_extract_epi16(src_vec, 3),  // Alpha of pixel 0 (duplicate)
+                        _mm_extract_epi16(src_vec, 3),  // Alpha of pixel 0 (duplicate)
+                        _mm_extract_epi16(src_vec, 3)   // Alpha of pixel 0 (duplicate)
+                );
+                
+                // Calculate inv_alpha = 65535 - alpha
+                __m128i inv_alpha_vec = _mm_sub_epi16(_mm_set1_epi16(65535), alpha_extracted);
+                
+                // Convert to 32-bit for multiplication to avoid overflow
+                __m128i src_lo = _mm_unpacklo_epi16(src_vec, _mm_setzero_si128());
+                __m128i src_hi = _mm_unpackhi_epi16(src_vec, _mm_setzero_si128());
+                __m128i dst_lo = _mm_unpacklo_epi16(dst_vec, _mm_setzero_si128());
+                __m128i dst_hi = _mm_unpackhi_epi16(dst_vec, _mm_setzero_si128());
+                __m128i alpha_lo = _mm_unpacklo_epi16(alpha_extracted, _mm_setzero_si128());
+                __m128i alpha_hi = _mm_unpackhi_epi16(alpha_extracted, _mm_setzero_si128());
+                __m128i inv_alpha_lo = _mm_unpacklo_epi16(inv_alpha_vec, _mm_setzero_si128());
+                __m128i inv_alpha_hi = _mm_unpackhi_epi16(inv_alpha_vec, _mm_setzero_si128());
+                
+                // Blend: result = (src * alpha + dst * inv_alpha) / 65535
+                __m128i blend_lo = _mm_add_epi32(_mm_mullo_epi32(src_lo, alpha_lo),
+                                               _mm_mullo_epi32(dst_lo, inv_alpha_lo));
+                __m128i blend_hi = _mm_add_epi32(_mm_mullo_epi32(src_hi, alpha_hi),
+                                               _mm_mullo_epi32(dst_hi, inv_alpha_hi));
+                
+                // Divide by 65535 using approximation: (x + (x >> 16)) >> 16
+                blend_lo = _mm_add_epi32(blend_lo, _mm_srli_epi32(blend_lo, 16));
+                blend_hi = _mm_add_epi32(blend_hi, _mm_srli_epi32(blend_hi, 16));
+                blend_lo = _mm_srli_epi32(blend_lo, 16);
+                blend_hi = _mm_srli_epi32(blend_hi, 16);
+                
+                // Pack back to 16-bit
+                __m128i result = _mm_packus_epi32(blend_lo, blend_hi);
+                
+                // Set alpha channel to 65535 for both pixels
+                result = _mm_insert_epi16(result, 65535, 3);  // Alpha of pixel 0
+                result = _mm_insert_epi16(result, 65535, 7);  // Alpha of pixel 1
+                
+                _mm_storeu_si128((__m128i*)(dst16 + x * 4), result);
+        }
+        
+        // Handle remaining pixels
+        for (; x < width; x++) {
+                uint16_t u_src = src16[0];
+                uint16_t y_src = src16[1];
+                uint16_t v_src = src16[2];
+                uint16_t a_src = src16[3];
+                
+                uint16_t u_dst = dst16[0];
+                uint16_t y_dst = dst16[1];
+                uint16_t v_dst = dst16[2];
+                
+                uint32_t inv_alpha = 65535 - a_src;
+                
+                dst16[0] = (uint16_t)(((uint32_t)u_src * a_src + (uint32_t)u_dst * inv_alpha) / 65535);
+                dst16[1] = (uint16_t)(((uint32_t)y_src * a_src + (uint32_t)y_dst * inv_alpha) / 65535);
+                dst16[2] = (uint16_t)(((uint32_t)v_src * a_src + (uint32_t)v_dst * inv_alpha) / 65535);
+                dst16[3] = 65535;
+                
+                dst16 += 4;
+                src16 += 4;
+        }
+}
+#endif
+
+#ifdef __ARM_NEON
+static void alpha_blend_y416_neon(uint8_t *dst, const uint8_t *src, int width)
+{
+        uint16_t *dst16 = (uint16_t *)dst;
+        const uint16_t *src16 = (const uint16_t *)src;
+        
+        int x = 0;
+        // Process 2 pixels at a time with NEON (2 pixels = 8 × 16-bit components)
+        for (; x <= width - 2; x += 2) {
+                // Load 2 Y416 pixels (8 × 16-bit values)
+                uint16x8_t src_vec = vld1q_u16(src16 + x * 4);
+                uint16x8_t dst_vec = vld1q_u16(dst16 + x * 4);
+                
+                // Extract alpha channels and duplicate for each component
+                // Format: U0 Y0 V0 A0 U1 Y1 V1 A1
+                uint16x8_t alpha_vec = vdupq_n_u16(0);
+                alpha_vec = vsetq_lane_u16(vgetq_lane_u16(src_vec, 3), alpha_vec, 0); // A0->U0
+                alpha_vec = vsetq_lane_u16(vgetq_lane_u16(src_vec, 3), alpha_vec, 1); // A0->Y0
+                alpha_vec = vsetq_lane_u16(vgetq_lane_u16(src_vec, 3), alpha_vec, 2); // A0->V0
+                alpha_vec = vsetq_lane_u16(vgetq_lane_u16(src_vec, 3), alpha_vec, 3); // A0->A0
+                alpha_vec = vsetq_lane_u16(vgetq_lane_u16(src_vec, 7), alpha_vec, 4); // A1->U1
+                alpha_vec = vsetq_lane_u16(vgetq_lane_u16(src_vec, 7), alpha_vec, 5); // A1->Y1
+                alpha_vec = vsetq_lane_u16(vgetq_lane_u16(src_vec, 7), alpha_vec, 6); // A1->V1
+                alpha_vec = vsetq_lane_u16(vgetq_lane_u16(src_vec, 7), alpha_vec, 7); // A1->A1
+                
+                // Calculate inv_alpha = 65535 - alpha
+                uint16x8_t inv_alpha_vec = vsubq_u16(vdupq_n_u16(65535), alpha_vec);
+                
+                // Convert to 32-bit for multiplication to avoid overflow
+                uint32x4_t src_lo = vmovl_u16(vget_low_u16(src_vec));
+                uint32x4_t src_hi = vmovl_u16(vget_high_u16(src_vec));
+                uint32x4_t dst_lo = vmovl_u16(vget_low_u16(dst_vec));
+                uint32x4_t dst_hi = vmovl_u16(vget_high_u16(dst_vec));
+                uint32x4_t alpha_lo = vmovl_u16(vget_low_u16(alpha_vec));
+                uint32x4_t alpha_hi = vmovl_u16(vget_high_u16(alpha_vec));
+                uint32x4_t inv_alpha_lo = vmovl_u16(vget_low_u16(inv_alpha_vec));
+                uint32x4_t inv_alpha_hi = vmovl_u16(vget_high_u16(inv_alpha_vec));
+                
+                // Blend: result = (src * alpha + dst * inv_alpha) / 65535
+                uint32x4_t blend_lo = vaddq_u32(vmulq_u32(src_lo, alpha_lo),
+                                               vmulq_u32(dst_lo, inv_alpha_lo));
+                uint32x4_t blend_hi = vaddq_u32(vmulq_u32(src_hi, alpha_hi),
+                                               vmulq_u32(dst_hi, inv_alpha_hi));
+                
+                // Divide by 65535 using approximation: (x + (x >> 16)) >> 16
+                blend_lo = vaddq_u32(blend_lo, vshrq_n_u32(blend_lo, 16));
+                blend_hi = vaddq_u32(blend_hi, vshrq_n_u32(blend_hi, 16));
+                blend_lo = vshrq_n_u32(blend_lo, 16);
+                blend_hi = vshrq_n_u32(blend_hi, 16);
+                
+                // Pack back to 16-bit
+                uint16x8_t result = vcombine_u16(vmovn_u32(blend_lo), vmovn_u32(blend_hi));
+                
+                // Set alpha channel to 65535 for both pixels
+                result = vsetq_lane_u16(65535, result, 3);  // Alpha of pixel 0
+                result = vsetq_lane_u16(65535, result, 7);  // Alpha of pixel 1
+                
+                vst1q_u16(dst16 + x * 4, result);
+        }
+        
+        // Handle remaining pixels
+        for (; x < width; x++) {
+                uint16_t u_src = src16[0];
+                uint16_t y_src = src16[1];
+                uint16_t v_src = src16[2];
+                uint16_t a_src = src16[3];
+                
+                uint16_t u_dst = dst16[0];
+                uint16_t y_dst = dst16[1];
+                uint16_t v_dst = dst16[2];
+                
+                uint32_t inv_alpha = 65535 - a_src;
+                
+                dst16[0] = (uint16_t)(((uint32_t)u_src * a_src + (uint32_t)u_dst * inv_alpha) / 65535);
+                dst16[1] = (uint16_t)(((uint32_t)y_src * a_src + (uint32_t)y_dst * inv_alpha) / 65535);
+                dst16[2] = (uint16_t)(((uint32_t)v_src * a_src + (uint32_t)v_dst * inv_alpha) / 65535);
+                dst16[3] = 65535;
+                
+                dst16 += 4;
+                src16 += 4;
+        }
+}
+#endif
+
 /**
  * Native Y416 alpha blending (16-bit YUV with alpha)
  * Y416 format: U16 Y16 V16 A16 (little-endian)
  */
 void alpha_blend_y416(uint8_t *dst, const uint8_t *src, int width)
 {
+#ifdef __AVX2__
+        alpha_blend_y416_avx2(dst, src, width);
+#elif defined(__SSE2__)
+        alpha_blend_y416_sse2(dst, src, width);
+#elif defined(__ARM_NEON)
+        alpha_blend_y416_neon(dst, src, width);
+#else
+        // Scalar fallback
         uint16_t *dst16 = (uint16_t *)dst;
         const uint16_t *src16 = (const uint16_t *)src;
         
@@ -2558,6 +2820,7 @@ void alpha_blend_y416(uint8_t *dst, const uint8_t *src, int width)
                 dst16 += 4;
                 src16 += 4;
         }
+#endif
 }
 
 /**
