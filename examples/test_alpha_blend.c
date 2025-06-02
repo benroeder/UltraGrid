@@ -77,6 +77,9 @@ static void alpha_blend_yuyv_scalar(uint8_t *dst, const uint8_t *src, const uint
 static void alpha_blend_rgb_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
 static void alpha_blend_v210_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
 static void alpha_blend_r10k_scalar(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width);
+static void alpha_blend_i420_scalar(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
+                                    const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
+                                    const uint8_t *alpha, int width, int height);
 
 // Scalar implementations for testing
 static void alpha_blend_rgba_scalar(uint8_t *dst, const uint8_t *src, int width)
@@ -1120,6 +1123,206 @@ static void benchmark_r10k_blending()
     free(alpha);
 }
 
+static void alpha_blend_i420_scalar(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
+                                    const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
+                                    const uint8_t *alpha, int width, int height)
+{
+        // Blend Y plane (full resolution)
+        for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                        uint8_t a = alpha[y * width + x];
+                        dst_y[y * width + x] = (src_y[y * width + x] * a + dst_y[y * width + x] * (255 - a)) / 255;
+                }
+        }
+        
+        // Blend U and V planes (half resolution - 4:2:0)
+        int chroma_width = width / 2;
+        int chroma_height = height / 2;
+        
+        for (int y = 0; y < chroma_height; y++) {
+                for (int x = 0; x < chroma_width; x++) {
+                        // Average alpha values for the 2x2 block of pixels
+                        int y2 = y * 2;
+                        int x2 = x * 2;
+                        uint16_t a00 = alpha[y2 * width + x2];
+                        uint16_t a01 = (x2 + 1 < width) ? alpha[y2 * width + x2 + 1] : a00;
+                        uint16_t a10 = (y2 + 1 < height) ? alpha[(y2 + 1) * width + x2] : a00;
+                        uint16_t a11 = ((x2 + 1 < width) && (y2 + 1 < height)) ? 
+                                       alpha[(y2 + 1) * width + x2 + 1] : a00;
+                        
+                        // Calculate average alpha for this chroma sample
+                        uint8_t avg_alpha = (a00 + a01 + a10 + a11) / 4;
+                        
+                        // Blend chroma
+                        int idx = y * chroma_width + x;
+                        dst_u[idx] = (src_u[idx] * avg_alpha + dst_u[idx] * (255 - avg_alpha)) / 255;
+                        dst_v[idx] = (src_v[idx] * avg_alpha + dst_v[idx] * (255 - avg_alpha)) / 255;
+                }
+        }
+}
+
+static void test_i420_blending()
+{
+    printf("\n=== Testing I420 Blending ===\n");
+    
+    // I420 format: Planar YUV 4:2:0
+    const int width = 4;
+    const int height = 4;
+    const int y_size = width * height;
+    const int chroma_size = (width / 2) * (height / 2);
+    
+    uint8_t *dst_y = malloc(y_size);
+    uint8_t *dst_u = malloc(chroma_size);
+    uint8_t *dst_v = malloc(chroma_size);
+    uint8_t *src_y = malloc(y_size);
+    uint8_t *src_u = malloc(chroma_size);
+    uint8_t *src_v = malloc(chroma_size);
+    uint8_t *alpha = malloc(y_size);
+    
+    if (!dst_y || !dst_u || !dst_v || !src_y || !src_u || !src_v || !alpha) {
+        printf("Memory allocation failed\n");
+        free(dst_y); free(dst_u); free(dst_v);
+        free(src_y); free(src_u); free(src_v);
+        free(alpha);
+        return;
+    }
+    
+    // Initialize I420 data
+    // Destination: bright Y=235, neutral chroma U=V=128
+    for (int i = 0; i < y_size; i++) {
+        dst_y[i] = 235;  // Bright luma
+        alpha[i] = 128;  // 50% alpha
+    }
+    for (int i = 0; i < chroma_size; i++) {
+        dst_u[i] = 128;  // Neutral chroma
+        dst_v[i] = 128;
+    }
+    
+    // Source: dark Y=16, neutral chroma U=V=128
+    for (int i = 0; i < y_size; i++) {
+        src_y[i] = 16;   // Dark luma
+    }
+    for (int i = 0; i < chroma_size; i++) {
+        src_u[i] = 128;  // Neutral chroma
+        src_v[i] = 128;
+    }
+    
+    printf("Before blend - dst Y[0]=%d U[0]=%d V[0]=%d\n", dst_y[0], dst_u[0], dst_v[0]);
+    printf("Before blend - src Y[0]=%d U[0]=%d V[0]=%d\n", src_y[0], src_u[0], src_v[0]);
+    printf("Alpha[0] = %d\n", alpha[0]);
+    
+    alpha_blend_i420(dst_y, dst_u, dst_v, src_y, src_u, src_v, alpha, width, height);
+    
+    printf("After blend  - dst Y[0]=%d U[0]=%d V[0]=%d\n", dst_y[0], dst_u[0], dst_v[0]);
+    
+    // Expected Y: (16 * 128 + 235 * 127) / 255 ≈ 125
+    int expected_y = 125;
+    int diff_y = abs(dst_y[0] - expected_y);
+    printf("Expected Y ~%d, got %d, diff=%d %s\n", expected_y, dst_y[0], diff_y, (diff_y <= 2) ? "✓" : "✗");
+    
+    free(dst_y); free(dst_u); free(dst_v);
+    free(src_y); free(src_u); free(src_v);
+    free(alpha);
+}
+
+static void benchmark_i420_blending()
+{
+    printf("\n=== Benchmarking I420 Blending ===\n");
+    
+    const int width = 1920;
+    const int height = 1080;
+    const int iterations = 100;
+    const int y_size = width * height;
+    const int chroma_size = (width / 2) * (height / 2);
+    
+    uint8_t *dst_y = malloc(y_size);
+    uint8_t *dst_u = malloc(chroma_size);
+    uint8_t *dst_v = malloc(chroma_size);
+    uint8_t *dst_y_copy = malloc(y_size);
+    uint8_t *dst_u_copy = malloc(chroma_size);
+    uint8_t *dst_v_copy = malloc(chroma_size);
+    uint8_t *src_y = malloc(y_size);
+    uint8_t *src_u = malloc(chroma_size);
+    uint8_t *src_v = malloc(chroma_size);
+    uint8_t *alpha = malloc(y_size);
+    
+    if (!dst_y || !dst_u || !dst_v || !dst_y_copy || !dst_u_copy || !dst_v_copy ||
+        !src_y || !src_u || !src_v || !alpha) {
+        printf("Failed to allocate memory for benchmark\n");
+        free(dst_y); free(dst_u); free(dst_v);
+        free(dst_y_copy); free(dst_u_copy); free(dst_v_copy);
+        free(src_y); free(src_u); free(src_v);
+        free(alpha);
+        return;
+    }
+    
+    // Initialize with random data
+    for (int i = 0; i < y_size; i++) {
+        dst_y[i] = rand() & 0xFF;
+        src_y[i] = rand() & 0xFF;
+        alpha[i] = rand() & 0xFF;
+        dst_y_copy[i] = dst_y[i];
+    }
+    for (int i = 0; i < chroma_size; i++) {
+        dst_u[i] = rand() & 0xFF;
+        dst_v[i] = rand() & 0xFF;
+        src_u[i] = rand() & 0xFF;
+        src_v[i] = rand() & 0xFF;
+        dst_u_copy[i] = dst_u[i];
+        dst_v_copy[i] = dst_v[i];
+    }
+    
+    // Test scalar implementation
+    printf("Scalar:\n");
+    clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        alpha_blend_i420_scalar(dst_y_copy, dst_u_copy, dst_v_copy, 
+                               src_y, src_u, src_v, alpha, width, height);
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < y_size; i++) {
+        dst_y[i] = dst_y_copy[i];
+    }
+    for (int i = 0; i < chroma_size; i++) {
+        dst_u[i] = dst_u_copy[i];
+        dst_v[i] = dst_v_copy[i];
+    }
+    
+    // Test optimized implementation
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        alpha_blend_i420(dst_y, dst_u, dst_v, src_y, src_u, src_v, alpha, width, height);
+    }
+    
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
+    printf("  Frame rate: %.1f HD fps (1920x1080)\n", fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
+    
+    free(dst_y); free(dst_u); free(dst_v);
+    free(dst_y_copy); free(dst_u_copy); free(dst_v_copy);
+    free(src_y); free(src_u); free(src_v);
+    free(alpha);
+}
+
 int main()
 {
     printf("Alpha Blending Test Program\n");
@@ -1134,6 +1337,7 @@ int main()
     test_rgb_optimized();
     test_v210_blending();
     test_r10k_blending();
+    test_i420_blending();
     
     benchmark_rgba_blending();
     benchmark_uyvy_blending();
@@ -1141,6 +1345,7 @@ int main()
     benchmark_rgb_blending();
     benchmark_v210_blending();
     benchmark_r10k_blending();
+    benchmark_i420_blending();
     
     return 0;
 }

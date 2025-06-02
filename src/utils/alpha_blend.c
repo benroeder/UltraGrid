@@ -2048,6 +2048,424 @@ void alpha_blend_r12l(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
 #undef BYTE_SWAP
 }
 
+#ifdef __AVX2__
+static void alpha_blend_i420_avx2(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
+                                  const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
+                                  const uint8_t *alpha, int width, int height)
+{
+        // Blend Y plane (full resolution)
+        for (int y = 0; y < height; y++) {
+                uint8_t *dst_row = dst_y + y * width;
+                const uint8_t *src_row = src_y + y * width;
+                const uint8_t *alpha_row = alpha + y * width;
+                
+                int x = 0;
+                // Process 32 pixels at a time with AVX2
+                for (; x <= width - 32; x += 32) {
+                        __m256i src_vec = _mm256_loadu_si256((__m256i*)(src_row + x));
+                        __m256i dst_vec = _mm256_loadu_si256((__m256i*)(dst_row + x));
+                        __m256i alpha_vec = _mm256_loadu_si256((__m256i*)(alpha_row + x));
+                        
+                        // Convert to 16-bit for calculation
+                        __m256i src_lo = _mm256_unpacklo_epi8(src_vec, _mm256_setzero_si256());
+                        __m256i src_hi = _mm256_unpackhi_epi8(src_vec, _mm256_setzero_si256());
+                        __m256i dst_lo = _mm256_unpacklo_epi8(dst_vec, _mm256_setzero_si256());
+                        __m256i dst_hi = _mm256_unpackhi_epi8(dst_vec, _mm256_setzero_si256());
+                        __m256i alpha_lo = _mm256_unpacklo_epi8(alpha_vec, _mm256_setzero_si256());
+                        __m256i alpha_hi = _mm256_unpackhi_epi8(alpha_vec, _mm256_setzero_si256());
+                        
+                        // Calculate inv_alpha = 255 - alpha
+                        __m256i inv_alpha_lo = _mm256_sub_epi16(_mm256_set1_epi16(255), alpha_lo);
+                        __m256i inv_alpha_hi = _mm256_sub_epi16(_mm256_set1_epi16(255), alpha_hi);
+                        
+                        // Blend: result = (src * alpha + dst * inv_alpha) >> 8
+                        __m256i blend_lo = _mm256_add_epi16(_mm256_mullo_epi16(src_lo, alpha_lo),
+                                                          _mm256_mullo_epi16(dst_lo, inv_alpha_lo));
+                        __m256i blend_hi = _mm256_add_epi16(_mm256_mullo_epi16(src_hi, alpha_hi),
+                                                          _mm256_mullo_epi16(dst_hi, inv_alpha_hi));
+                        
+                        // Proper division by 255: (x + (x >> 8)) >> 8
+                        blend_lo = _mm256_add_epi16(blend_lo, _mm256_srli_epi16(blend_lo, 8));
+                        blend_hi = _mm256_add_epi16(blend_hi, _mm256_srli_epi16(blend_hi, 8));
+                        blend_lo = _mm256_srli_epi16(blend_lo, 8);
+                        blend_hi = _mm256_srli_epi16(blend_hi, 8);
+                        
+                        // Pack back to 8-bit
+                        __m256i result = _mm256_packus_epi16(blend_lo, blend_hi);
+                        _mm256_storeu_si256((__m256i*)(dst_row + x), result);
+                }
+                
+                // Handle remaining pixels
+                for (; x < width; x++) {
+                        uint8_t a = alpha_row[x];
+                        uint32_t temp = src_row[x] * a + dst_row[x] * (255 - a);
+                        dst_row[x] = (temp + (temp >> 8)) >> 8;
+                }
+        }
+        
+        // Blend U and V planes (half resolution - 4:2:0)
+        int chroma_width = width / 2;
+        int chroma_height = height / 2;
+        
+        for (int y = 0; y < chroma_height; y++) {
+                uint8_t *dst_u_row = dst_u + y * chroma_width;
+                uint8_t *dst_v_row = dst_v + y * chroma_width;
+                const uint8_t *src_u_row = src_u + y * chroma_width;
+                const uint8_t *src_v_row = src_v + y * chroma_width;
+                
+                int x = 0;
+                // Process 16 chroma samples at a time with AVX2
+                for (; x <= chroma_width - 16; x += 16) {
+                        // Calculate average alpha for each chroma sample from 2x2 blocks
+                        __m256i avg_alpha = _mm256_setzero_si256();
+                        
+                        for (int i = 0; i < 16; i++) {
+                                int y2 = y * 2;
+                                int x2 = (x + i) * 2;
+                                uint16_t a00 = alpha[y2 * width + x2];
+                                uint16_t a01 = (x2 + 1 < width) ? alpha[y2 * width + x2 + 1] : a00;
+                                uint16_t a10 = (y2 + 1 < height) ? alpha[(y2 + 1) * width + x2] : a00;
+                                uint16_t a11 = ((x2 + 1 < width) && (y2 + 1 < height)) ? 
+                                               alpha[(y2 + 1) * width + x2 + 1] : a00;
+                                uint8_t sample_alpha = (a00 + a01 + a10 + a11) / 4;
+                                ((uint8_t*)&avg_alpha)[i] = sample_alpha;
+                        }
+                        
+                        // Load chroma data
+                        __m128i src_u_vec = _mm_loadu_si128((__m128i*)(src_u_row + x));
+                        __m128i src_v_vec = _mm_loadu_si128((__m128i*)(src_v_row + x));
+                        __m128i dst_u_vec = _mm_loadu_si128((__m128i*)(dst_u_row + x));
+                        __m128i dst_v_vec = _mm_loadu_si128((__m128i*)(dst_v_row + x));
+                        
+                        // Convert alpha to match chroma processing
+                        __m128i alpha_vec = _mm256_extracti128_si256(avg_alpha, 0);
+                        
+                        // Convert to 16-bit for calculation
+                        __m256i src_u_16 = _mm256_cvtepu8_epi16(src_u_vec);
+                        __m256i src_v_16 = _mm256_cvtepu8_epi16(src_v_vec);
+                        __m256i dst_u_16 = _mm256_cvtepu8_epi16(dst_u_vec);
+                        __m256i dst_v_16 = _mm256_cvtepu8_epi16(dst_v_vec);
+                        __m256i alpha_16 = _mm256_cvtepu8_epi16(alpha_vec);
+                        
+                        // Calculate inv_alpha = 255 - alpha
+                        __m256i inv_alpha_16 = _mm256_sub_epi16(_mm256_set1_epi16(255), alpha_16);
+                        
+                        // Blend U and V
+                        __m256i blend_u = _mm256_add_epi16(_mm256_mullo_epi16(src_u_16, alpha_16),
+                                                         _mm256_mullo_epi16(dst_u_16, inv_alpha_16));
+                        __m256i blend_v = _mm256_add_epi16(_mm256_mullo_epi16(src_v_16, alpha_16),
+                                                         _mm256_mullo_epi16(dst_v_16, inv_alpha_16));
+                        
+                        // Proper division by 255
+                        blend_u = _mm256_add_epi16(blend_u, _mm256_srli_epi16(blend_u, 8));
+                        blend_v = _mm256_add_epi16(blend_v, _mm256_srli_epi16(blend_v, 8));
+                        blend_u = _mm256_srli_epi16(blend_u, 8);
+                        blend_v = _mm256_srli_epi16(blend_v, 8);
+                        
+                        // Pack back to 8-bit and store
+                        __m128i result_u = _mm256_extracti128_si256(_mm256_packus_epi16(blend_u, blend_u), 0);
+                        __m128i result_v = _mm256_extracti128_si256(_mm256_packus_epi16(blend_v, blend_v), 0);
+                        _mm_storeu_si128((__m128i*)(dst_u_row + x), result_u);
+                        _mm_storeu_si128((__m128i*)(dst_v_row + x), result_v);
+                }
+                
+                // Handle remaining chroma samples
+                for (; x < chroma_width; x++) {
+                        int y2 = y * 2;
+                        int x2 = x * 2;
+                        uint16_t a00 = alpha[y2 * width + x2];
+                        uint16_t a01 = (x2 + 1 < width) ? alpha[y2 * width + x2 + 1] : a00;
+                        uint16_t a10 = (y2 + 1 < height) ? alpha[(y2 + 1) * width + x2] : a00;
+                        uint16_t a11 = ((x2 + 1 < width) && (y2 + 1 < height)) ? 
+                                       alpha[(y2 + 1) * width + x2 + 1] : a00;
+                        
+                        uint8_t avg_alpha = (a00 + a01 + a10 + a11) / 4;
+                        
+                        uint32_t temp_u = src_u_row[x] * avg_alpha + dst_u_row[x] * (255 - avg_alpha);
+                        uint32_t temp_v = src_v_row[x] * avg_alpha + dst_v_row[x] * (255 - avg_alpha);
+                        dst_u_row[x] = (temp_u + (temp_u >> 8)) >> 8;
+                        dst_v_row[x] = (temp_v + (temp_v >> 8)) >> 8;
+                }
+        }
+}
+#endif
+
+#ifdef __SSE2__
+static void alpha_blend_i420_sse2(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
+                                  const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
+                                  const uint8_t *alpha, int width, int height)
+{
+        // Blend Y plane (full resolution)
+        for (int y = 0; y < height; y++) {
+                uint8_t *dst_row = dst_y + y * width;
+                const uint8_t *src_row = src_y + y * width;
+                const uint8_t *alpha_row = alpha + y * width;
+                
+                int x = 0;
+                // Process 16 pixels at a time with SSE2
+                for (; x <= width - 16; x += 16) {
+                        __m128i src_vec = _mm_loadu_si128((__m128i*)(src_row + x));
+                        __m128i dst_vec = _mm_loadu_si128((__m128i*)(dst_row + x));
+                        __m128i alpha_vec = _mm_loadu_si128((__m128i*)(alpha_row + x));
+                        
+                        // Convert to 16-bit for calculation
+                        __m128i src_lo = _mm_unpacklo_epi8(src_vec, _mm_setzero_si128());
+                        __m128i src_hi = _mm_unpackhi_epi8(src_vec, _mm_setzero_si128());
+                        __m128i dst_lo = _mm_unpacklo_epi8(dst_vec, _mm_setzero_si128());
+                        __m128i dst_hi = _mm_unpackhi_epi8(dst_vec, _mm_setzero_si128());
+                        __m128i alpha_lo = _mm_unpacklo_epi8(alpha_vec, _mm_setzero_si128());
+                        __m128i alpha_hi = _mm_unpackhi_epi8(alpha_vec, _mm_setzero_si128());
+                        
+                        // Calculate inv_alpha = 255 - alpha
+                        __m128i inv_alpha_lo = _mm_sub_epi16(_mm_set1_epi16(255), alpha_lo);
+                        __m128i inv_alpha_hi = _mm_sub_epi16(_mm_set1_epi16(255), alpha_hi);
+                        
+                        // Blend: result = (src * alpha + dst * inv_alpha) >> 8
+                        __m128i blend_lo = _mm_add_epi16(_mm_mullo_epi16(src_lo, alpha_lo),
+                                                        _mm_mullo_epi16(dst_lo, inv_alpha_lo));
+                        __m128i blend_hi = _mm_add_epi16(_mm_mullo_epi16(src_hi, alpha_hi),
+                                                        _mm_mullo_epi16(dst_hi, inv_alpha_hi));
+                        
+                        // Proper division by 255: (x + (x >> 8)) >> 8
+                        blend_lo = _mm_add_epi16(blend_lo, _mm_srli_epi16(blend_lo, 8));
+                        blend_hi = _mm_add_epi16(blend_hi, _mm_srli_epi16(blend_hi, 8));
+                        blend_lo = _mm_srli_epi16(blend_lo, 8);
+                        blend_hi = _mm_srli_epi16(blend_hi, 8);
+                        
+                        // Pack back to 8-bit
+                        __m128i result = _mm_packus_epi16(blend_lo, blend_hi);
+                        _mm_storeu_si128((__m128i*)(dst_row + x), result);
+                }
+                
+                // Handle remaining pixels
+                for (; x < width; x++) {
+                        uint8_t a = alpha_row[x];
+                        uint32_t temp = src_row[x] * a + dst_row[x] * (255 - a);
+                        dst_row[x] = (temp + (temp >> 8)) >> 8;
+                }
+        }
+        
+        // Blend U and V planes (half resolution - 4:2:0)
+        int chroma_width = width / 2;
+        int chroma_height = height / 2;
+        
+        for (int y = 0; y < chroma_height; y++) {
+                uint8_t *dst_u_row = dst_u + y * chroma_width;
+                uint8_t *dst_v_row = dst_v + y * chroma_width;
+                const uint8_t *src_u_row = src_u + y * chroma_width;
+                const uint8_t *src_v_row = src_v + y * chroma_width;
+                
+                int x = 0;
+                // Process 8 chroma samples at a time with SSE2
+                for (; x <= chroma_width - 8; x += 8) {
+                        // Calculate average alpha for each chroma sample from 2x2 blocks
+                        uint8_t avg_alphas[8];
+                        for (int i = 0; i < 8; i++) {
+                                int y2 = y * 2;
+                                int x2 = (x + i) * 2;
+                                uint16_t a00 = alpha[y2 * width + x2];
+                                uint16_t a01 = (x2 + 1 < width) ? alpha[y2 * width + x2 + 1] : a00;
+                                uint16_t a10 = (y2 + 1 < height) ? alpha[(y2 + 1) * width + x2] : a00;
+                                uint16_t a11 = ((x2 + 1 < width) && (y2 + 1 < height)) ? 
+                                               alpha[(y2 + 1) * width + x2 + 1] : a00;
+                                avg_alphas[i] = (a00 + a01 + a10 + a11) / 4;
+                        }
+                        
+                        // Load chroma data
+                        __m128i src_u_vec = _mm_loadl_epi64((__m128i*)(src_u_row + x));
+                        __m128i src_v_vec = _mm_loadl_epi64((__m128i*)(src_v_row + x));
+                        __m128i dst_u_vec = _mm_loadl_epi64((__m128i*)(dst_u_row + x));
+                        __m128i dst_v_vec = _mm_loadl_epi64((__m128i*)(dst_v_row + x));
+                        __m128i alpha_vec = _mm_loadl_epi64((__m128i*)avg_alphas);
+                        
+                        // Convert to 16-bit for calculation
+                        __m128i src_u_16 = _mm_unpacklo_epi8(src_u_vec, _mm_setzero_si128());
+                        __m128i src_v_16 = _mm_unpacklo_epi8(src_v_vec, _mm_setzero_si128());
+                        __m128i dst_u_16 = _mm_unpacklo_epi8(dst_u_vec, _mm_setzero_si128());
+                        __m128i dst_v_16 = _mm_unpacklo_epi8(dst_v_vec, _mm_setzero_si128());
+                        __m128i alpha_16 = _mm_unpacklo_epi8(alpha_vec, _mm_setzero_si128());
+                        
+                        // Calculate inv_alpha = 255 - alpha
+                        __m128i inv_alpha_16 = _mm_sub_epi16(_mm_set1_epi16(255), alpha_16);
+                        
+                        // Blend U and V
+                        __m128i blend_u = _mm_add_epi16(_mm_mullo_epi16(src_u_16, alpha_16),
+                                                       _mm_mullo_epi16(dst_u_16, inv_alpha_16));
+                        __m128i blend_v = _mm_add_epi16(_mm_mullo_epi16(src_v_16, alpha_16),
+                                                       _mm_mullo_epi16(dst_v_16, inv_alpha_16));
+                        
+                        // Proper division by 255
+                        blend_u = _mm_add_epi16(blend_u, _mm_srli_epi16(blend_u, 8));
+                        blend_v = _mm_add_epi16(blend_v, _mm_srli_epi16(blend_v, 8));
+                        blend_u = _mm_srli_epi16(blend_u, 8);
+                        blend_v = _mm_srli_epi16(blend_v, 8);
+                        
+                        // Pack back to 8-bit and store
+                        __m128i result_u = _mm_packus_epi16(blend_u, blend_u);
+                        __m128i result_v = _mm_packus_epi16(blend_v, blend_v);
+                        _mm_storel_epi64((__m128i*)(dst_u_row + x), result_u);
+                        _mm_storel_epi64((__m128i*)(dst_v_row + x), result_v);
+                }
+                
+                // Handle remaining chroma samples
+                for (; x < chroma_width; x++) {
+                        int y2 = y * 2;
+                        int x2 = x * 2;
+                        uint16_t a00 = alpha[y2 * width + x2];
+                        uint16_t a01 = (x2 + 1 < width) ? alpha[y2 * width + x2 + 1] : a00;
+                        uint16_t a10 = (y2 + 1 < height) ? alpha[(y2 + 1) * width + x2] : a00;
+                        uint16_t a11 = ((x2 + 1 < width) && (y2 + 1 < height)) ? 
+                                       alpha[(y2 + 1) * width + x2 + 1] : a00;
+                        
+                        uint8_t avg_alpha = (a00 + a01 + a10 + a11) / 4;
+                        
+                        uint32_t temp_u = src_u_row[x] * avg_alpha + dst_u_row[x] * (255 - avg_alpha);
+                        uint32_t temp_v = src_v_row[x] * avg_alpha + dst_v_row[x] * (255 - avg_alpha);
+                        dst_u_row[x] = (temp_u + (temp_u >> 8)) >> 8;
+                        dst_v_row[x] = (temp_v + (temp_v >> 8)) >> 8;
+                }
+        }
+}
+#endif
+
+#ifdef __ARM_NEON
+static void alpha_blend_i420_neon(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
+                                  const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
+                                  const uint8_t *alpha, int width, int height)
+{
+        // Blend Y plane (full resolution)
+        for (int y = 0; y < height; y++) {
+                uint8_t *dst_row = dst_y + y * width;
+                const uint8_t *src_row = src_y + y * width;
+                const uint8_t *alpha_row = alpha + y * width;
+                
+                int x = 0;
+                // Process 16 pixels at a time with NEON
+                for (; x <= width - 16; x += 16) {
+                        uint8x16_t src_vec = vld1q_u8(src_row + x);
+                        uint8x16_t dst_vec = vld1q_u8(dst_row + x);
+                        uint8x16_t alpha_vec = vld1q_u8(alpha_row + x);
+                        
+                        // Convert to 16-bit for calculation
+                        uint16x8_t src_lo = vmovl_u8(vget_low_u8(src_vec));
+                        uint16x8_t src_hi = vmovl_u8(vget_high_u8(src_vec));
+                        uint16x8_t dst_lo = vmovl_u8(vget_low_u8(dst_vec));
+                        uint16x8_t dst_hi = vmovl_u8(vget_high_u8(dst_vec));
+                        uint16x8_t alpha_lo = vmovl_u8(vget_low_u8(alpha_vec));
+                        uint16x8_t alpha_hi = vmovl_u8(vget_high_u8(alpha_vec));
+                        
+                        // Calculate inv_alpha = 255 - alpha
+                        uint16x8_t inv_alpha_lo = vsubq_u16(vdupq_n_u16(255), alpha_lo);
+                        uint16x8_t inv_alpha_hi = vsubq_u16(vdupq_n_u16(255), alpha_hi);
+                        
+                        // Blend: result = (src * alpha + dst * inv_alpha)
+                        uint16x8_t blend_lo = vaddq_u16(vmulq_u16(src_lo, alpha_lo),
+                                                       vmulq_u16(dst_lo, inv_alpha_lo));
+                        uint16x8_t blend_hi = vaddq_u16(vmulq_u16(src_hi, alpha_hi),
+                                                       vmulq_u16(dst_hi, inv_alpha_hi));
+                        
+                        // Proper division by 255: (x + (x >> 8)) >> 8
+                        blend_lo = vaddq_u16(blend_lo, vshrq_n_u16(blend_lo, 8));
+                        blend_hi = vaddq_u16(blend_hi, vshrq_n_u16(blend_hi, 8));
+                        blend_lo = vshrq_n_u16(blend_lo, 8);
+                        blend_hi = vshrq_n_u16(blend_hi, 8);
+                        
+                        // Pack back to 8-bit
+                        uint8x16_t result = vcombine_u8(vmovn_u16(blend_lo), vmovn_u16(blend_hi));
+                        vst1q_u8(dst_row + x, result);
+                }
+                
+                // Handle remaining pixels
+                for (; x < width; x++) {
+                        uint8_t a = alpha_row[x];
+                        uint32_t temp = src_row[x] * a + dst_row[x] * (255 - a);
+                        dst_row[x] = (temp + (temp >> 8)) >> 8;
+                }
+        }
+        
+        // Blend U and V planes (half resolution - 4:2:0)
+        int chroma_width = width / 2;
+        int chroma_height = height / 2;
+        
+        for (int y = 0; y < chroma_height; y++) {
+                uint8_t *dst_u_row = dst_u + y * chroma_width;
+                uint8_t *dst_v_row = dst_v + y * chroma_width;
+                const uint8_t *src_u_row = src_u + y * chroma_width;
+                const uint8_t *src_v_row = src_v + y * chroma_width;
+                
+                int x = 0;
+                // Process 8 chroma samples at a time with NEON
+                for (; x <= chroma_width - 8; x += 8) {
+                        // Calculate average alpha for each chroma sample from 2x2 blocks
+                        uint8_t avg_alphas[8];
+                        for (int i = 0; i < 8; i++) {
+                                int y2 = y * 2;
+                                int x2 = (x + i) * 2;
+                                uint16_t a00 = alpha[y2 * width + x2];
+                                uint16_t a01 = (x2 + 1 < width) ? alpha[y2 * width + x2 + 1] : a00;
+                                uint16_t a10 = (y2 + 1 < height) ? alpha[(y2 + 1) * width + x2] : a00;
+                                uint16_t a11 = ((x2 + 1 < width) && (y2 + 1 < height)) ? 
+                                               alpha[(y2 + 1) * width + x2 + 1] : a00;
+                                avg_alphas[i] = (a00 + a01 + a10 + a11) / 4;
+                        }
+                        
+                        // Load chroma data
+                        uint8x8_t src_u_vec = vld1_u8(src_u_row + x);
+                        uint8x8_t src_v_vec = vld1_u8(src_v_row + x);
+                        uint8x8_t dst_u_vec = vld1_u8(dst_u_row + x);
+                        uint8x8_t dst_v_vec = vld1_u8(dst_v_row + x);
+                        uint8x8_t alpha_vec = vld1_u8(avg_alphas);
+                        
+                        // Convert to 16-bit for calculation
+                        uint16x8_t src_u_16 = vmovl_u8(src_u_vec);
+                        uint16x8_t src_v_16 = vmovl_u8(src_v_vec);
+                        uint16x8_t dst_u_16 = vmovl_u8(dst_u_vec);
+                        uint16x8_t dst_v_16 = vmovl_u8(dst_v_vec);
+                        uint16x8_t alpha_16 = vmovl_u8(alpha_vec);
+                        
+                        // Calculate inv_alpha = 255 - alpha
+                        uint16x8_t inv_alpha_16 = vsubq_u16(vdupq_n_u16(255), alpha_16);
+                        
+                        // Blend U and V
+                        uint16x8_t blend_u = vaddq_u16(vmulq_u16(src_u_16, alpha_16),
+                                                      vmulq_u16(dst_u_16, inv_alpha_16));
+                        uint16x8_t blend_v = vaddq_u16(vmulq_u16(src_v_16, alpha_16),
+                                                      vmulq_u16(dst_v_16, inv_alpha_16));
+                        
+                        // Proper division by 255
+                        blend_u = vaddq_u16(blend_u, vshrq_n_u16(blend_u, 8));
+                        blend_v = vaddq_u16(blend_v, vshrq_n_u16(blend_v, 8));
+                        blend_u = vshrq_n_u16(blend_u, 8);
+                        blend_v = vshrq_n_u16(blend_v, 8);
+                        
+                        // Pack back to 8-bit and store
+                        uint8x8_t result_u = vmovn_u16(blend_u);
+                        uint8x8_t result_v = vmovn_u16(blend_v);
+                        vst1_u8(dst_u_row + x, result_u);
+                        vst1_u8(dst_v_row + x, result_v);
+                }
+                
+                // Handle remaining chroma samples
+                for (; x < chroma_width; x++) {
+                        int y2 = y * 2;
+                        int x2 = x * 2;
+                        uint16_t a00 = alpha[y2 * width + x2];
+                        uint16_t a01 = (x2 + 1 < width) ? alpha[y2 * width + x2 + 1] : a00;
+                        uint16_t a10 = (y2 + 1 < height) ? alpha[(y2 + 1) * width + x2] : a00;
+                        uint16_t a11 = ((x2 + 1 < width) && (y2 + 1 < height)) ? 
+                                       alpha[(y2 + 1) * width + x2 + 1] : a00;
+                        
+                        uint8_t avg_alpha = (a00 + a01 + a10 + a11) / 4;
+                        
+                        uint32_t temp_u = src_u_row[x] * avg_alpha + dst_u_row[x] * (255 - avg_alpha);
+                        uint32_t temp_v = src_v_row[x] * avg_alpha + dst_v_row[x] * (255 - avg_alpha);
+                        dst_u_row[x] = (temp_u + (temp_u >> 8)) >> 8;
+                        dst_v_row[x] = (temp_v + (temp_v >> 8)) >> 8;
+                }
+        }
+}
+#endif
+
 /**
  * Native I420 alpha blending (YUV 4:2:0 planar)
  */
@@ -2055,12 +2473,20 @@ void alpha_blend_i420(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
                       const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
                       const uint8_t *alpha, int width, int height)
 {
+#ifdef __AVX2__
+        alpha_blend_i420_avx2(dst_y, dst_u, dst_v, src_y, src_u, src_v, alpha, width, height);
+#elif defined(__SSE2__)
+        alpha_blend_i420_sse2(dst_y, dst_u, dst_v, src_y, src_u, src_v, alpha, width, height);
+#elif defined(__ARM_NEON)
+        alpha_blend_i420_neon(dst_y, dst_u, dst_v, src_y, src_u, src_v, alpha, width, height);
+#else
+        // Scalar fallback
         // Blend Y plane (full resolution)
         for (int y = 0; y < height; y++) {
                 for (int x = 0; x < width; x++) {
                         uint8_t a = alpha[y * width + x];
-                        dst_y[y * width + x] = (src_y[y * width + x] * a + 
-                                                dst_y[y * width + x] * (255 - a)) / 255;
+                        uint32_t temp = src_y[y * width + x] * a + dst_y[y * width + x] * (255 - a);
+                        dst_y[y * width + x] = (temp + (temp >> 8)) >> 8;
                 }
         }
         
@@ -2084,10 +2510,13 @@ void alpha_blend_i420(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
                         
                         // Blend chroma
                         int idx = y * chroma_width + x;
-                        dst_u[idx] = (src_u[idx] * avg_alpha + dst_u[idx] * (255 - avg_alpha)) / 255;
-                        dst_v[idx] = (src_v[idx] * avg_alpha + dst_v[idx] * (255 - avg_alpha)) / 255;
+                        uint32_t temp_u = src_u[idx] * avg_alpha + dst_u[idx] * (255 - avg_alpha);
+                        uint32_t temp_v = src_v[idx] * avg_alpha + dst_v[idx] * (255 - avg_alpha);
+                        dst_u[idx] = (temp_u + (temp_u >> 8)) >> 8;
+                        dst_v[idx] = (temp_v + (temp_v >> 8)) >> 8;
                 }
         }
+#endif
 }
 
 /**
