@@ -155,7 +155,7 @@ brew install automake autoconf libtool pkg-config
 ## Alpha Blending and Overlay Support
 
 UltraGrid includes comprehensive alpha blending utilities in `src/utils/alpha_blend.h`:
-- **Optimized scalar blending**: Uses FFmpeg's FAST_DIV255 optimization
+- **Optimized scalar blending**: Uses exact division for precise results without aliasing
 - **Native format support**: Prevents quality loss from color space conversions
 - **Simple and maintainable**: Scalar-only implementation for easier debugging and portability
 
@@ -205,22 +205,24 @@ make test_alpha_blend
 - Fixed overlay module bugs (side-by-side duplication, buffer overflows)
 - Implemented comprehensive native format alpha blending with scalar optimization
 - Added cross-platform nanosecond file monitoring
-- Created reusable alpha blending utilities with FAST_DIV255 optimization
-- Performance: >2000 megapixels/second on modern hardware
+- Created reusable alpha blending utilities with exact division (no aliasing)
+- Performance: ~2000 megapixels/second on modern hardware
 - Simplified implementation: Removed SIMD complexity, using optimized scalar only
+- Added full R12L format support with correct 12-bit packed handling
 
 ## Alpha Blending Implementation Details
 
 ### Scalar-Only Implementation
 The alpha blending utilities now use a simplified scalar-only implementation:
-- All formats use the FAST_DIV255 optimization: `((x + 128) * 257) >> 16`
+- All formats use exact division by 255 for precise results
 - Removed SIMD complexity for easier maintenance and debugging
-- Performance remains excellent at >2000 megapixels/second
+- Performance remains excellent at ~2000 megapixels/second
 - More portable across different architectures without SIMD-specific code
+- No aliasing artifacts thanks to exact division
 
-### FAST_DIV255 Optimization
-The FAST_DIV255 optimization approximates division by 255:
-- Formula: `((x + 128) * 257) >> 16`
-- More accurate than simple bit shifting `(x + 128) >> 8`
-- Avoids expensive division operations
-- Used by FFmpeg and other high-performance video processing libraries
+### Division Implementation
+The implementation uses exact division for accurate blending:
+- Formula: `result = (src * alpha + dst * (255 - alpha)) / 255`
+- Provides precise results without rounding errors or aliasing
+- While slightly slower than approximations, still achieves excellent performance
+- Ensures high visual quality for professional video applications

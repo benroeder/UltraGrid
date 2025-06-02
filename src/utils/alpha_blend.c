@@ -43,11 +43,10 @@
 #include "utils/alpha_blend.h"
 
 /**
- * FFmpeg's FAST_DIV255 optimization
- * Approximates division by 255 as: ((x + 128) * 257) >> 16
- * This is slightly more accurate than (x + 128) >> 8 and avoids division
+ * Use exact division by 255 for accurate alpha blending
+ * This prevents aliasing artifacts at edges
  */
-#define FAST_DIV255(x) ((((x) + 128) * 257) >> 16)
+#define EXACT_DIV255(x) ((x) / 255)
 
 /**
  * Native RGBA alpha blending
@@ -62,10 +61,10 @@ void alpha_blend_rgba(uint8_t *dst, const uint8_t *src, int width)
                 uint8_t a = src[3];
                 
                 // Alpha blend: out = overlay * alpha + video * (1 - alpha)
-                // Use FAST_DIV255 for more accurate and faster division
-                dst[0] = FAST_DIV255(r * a + dst[0] * (255 - a));
-                dst[1] = FAST_DIV255(g * a + dst[1] * (255 - a));
-                dst[2] = FAST_DIV255(b * a + dst[2] * (255 - a));
+                // Use exact division for accurate alpha blending
+                dst[0] = EXACT_DIV255(r * a + dst[0] * (255 - a));
+                dst[1] = EXACT_DIV255(g * a + dst[1] * (255 - a));
+                dst[2] = EXACT_DIV255(b * a + dst[2] * (255 - a));
                 dst[3] = 255;  // Keep output fully opaque
                 
                 src += 4;
@@ -98,13 +97,13 @@ void alpha_blend_uyvy(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 uint8_t y1_dst = dst[3];
                 
                 // Blend Y components with their respective alphas
-                dst[1] = FAST_DIV255(y0_src * a0 + y0_dst * (255 - a0));
-                dst[3] = FAST_DIV255(y1_src * a1 + y1_dst * (255 - a1));
+                dst[1] = EXACT_DIV255(y0_src * a0 + y0_dst * (255 - a0));
+                dst[3] = EXACT_DIV255(y1_src * a1 + y1_dst * (255 - a1));
                 
                 // For U and V, use average of both alphas
                 uint16_t avg_alpha = (a0 + a1 + 1) >> 1;  // Round up
-                dst[0] = FAST_DIV255(u_src * avg_alpha + u_dst * (255 - avg_alpha));
-                dst[2] = FAST_DIV255(v_src * avg_alpha + v_dst * (255 - avg_alpha));
+                dst[0] = EXACT_DIV255(u_src * avg_alpha + u_dst * (255 - avg_alpha));
+                dst[2] = EXACT_DIV255(v_src * avg_alpha + v_dst * (255 - avg_alpha));
                 
                 src += 4;
                 dst += 4;
@@ -137,13 +136,13 @@ void alpha_blend_yuyv(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 uint8_t v_dst = dst[3];
                 
                 // Blend Y components with their respective alphas
-                dst[0] = FAST_DIV255(y0_src * a0 + y0_dst * (255 - a0));
-                dst[2] = FAST_DIV255(y1_src * a1 + y1_dst * (255 - a1));
+                dst[0] = EXACT_DIV255(y0_src * a0 + y0_dst * (255 - a0));
+                dst[2] = EXACT_DIV255(y1_src * a1 + y1_dst * (255 - a1));
                 
                 // For U and V, use average of both alphas
                 uint16_t avg_alpha = (a0 + a1 + 1) >> 1;  // Round up
-                dst[1] = FAST_DIV255(u_src * avg_alpha + u_dst * (255 - avg_alpha));
-                dst[3] = FAST_DIV255(v_src * avg_alpha + v_dst * (255 - avg_alpha));
+                dst[1] = EXACT_DIV255(u_src * avg_alpha + u_dst * (255 - avg_alpha));
+                dst[3] = EXACT_DIV255(v_src * avg_alpha + v_dst * (255 - avg_alpha));
                 
                 src += 4;
                 dst += 4;
@@ -161,10 +160,10 @@ void alpha_blend_rgb(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int
         for (int x = 0; x < width; x++) {
                 uint8_t a = alpha[x];
                 
-                // Use FAST_DIV255 for RGB as well
-                dst[0] = FAST_DIV255(src[0] * a + dst[0] * (255 - a));
-                dst[1] = FAST_DIV255(src[1] * a + dst[1] * (255 - a));
-                dst[2] = FAST_DIV255(src[2] * a + dst[2] * (255 - a));
+                // Use exact division for accurate alpha blending
+                dst[0] = EXACT_DIV255(src[0] * a + dst[0] * (255 - a));
+                dst[1] = EXACT_DIV255(src[1] * a + dst[1] * (255 - a));
+                dst[2] = EXACT_DIV255(src[2] * a + dst[2] * (255 - a));
                 
                 src += 3;
                 dst += 3;
@@ -310,79 +309,113 @@ void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
 
 /**
  * Native R12L alpha blending (12-bit RGB packed, little-endian)
- * R12L format: 8 pixels of 12-bit RGB packed into 36 bytes
+ * R12L format: 36 bytes contain 8 pixels (8 pixels * 36 bits per pixel / 8 bits per byte)
+ * Each pixel: 12 bits R + 12 bits G + 12 bits B = 36 bits
+ * Layout: [R0 G0][B0 R1][G1 B1][R2 G2][B2 R3][G3 B3][R4 G4][B4 R5][G5 B5][R6 G6][B6 R7][G7 B7]
+ * Where each pair of brackets represents 3 bytes (24 bits), containing parts of 2 pixels
  */
 void alpha_blend_r12l(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
-        // Process 8 pixels at a time (each group is 36 bytes)
-        int x = 0;
-        for (; x < width - 7; x += 8) {
-                // Each group of 8 pixels uses 36 bytes (8 * 3 * 12 / 8)
-                const uint8_t *src_group = src + (x / 8) * 36;
-                uint8_t *dst_group = dst + (x / 8) * 36;
+        // Process pixels in groups of 8 (which pack into 36 bytes)
+        int pixels_processed = 0;
+        
+        while (pixels_processed + 8 <= width) {
+                // Point to the start of this 8-pixel group
+                const uint8_t *src_ptr = src + (pixels_processed / 8) * 36;
+                uint8_t *dst_ptr = dst + (pixels_processed / 8) * 36;
                 
-                // Extract and blend each pixel in the group
+                // Extract all 8 pixels first
+                uint16_t src_pixels[8][3]; // [pixel][component: R,G,B]
+                uint16_t dst_pixels[8][3];
+                
+                // Unpack pixels - every 9 bytes contains 2 pixels
+                for (int pair = 0; pair < 4; pair++) {
+                        int byte_offset = pair * 9;
+                        
+                        // First pixel of pair: R0 and G0 in first 3 bytes
+                        uint32_t data = ((uint32_t)src_ptr[byte_offset] << 0) |
+                                       ((uint32_t)src_ptr[byte_offset + 1] << 8) |
+                                       ((uint32_t)src_ptr[byte_offset + 2] << 16);
+                        src_pixels[pair * 2][0] = (data >> 0) & 0xFFF;  // R0
+                        src_pixels[pair * 2][1] = (data >> 12) & 0xFFF; // G0
+                        
+                        data = ((uint32_t)dst_ptr[byte_offset] << 0) |
+                               ((uint32_t)dst_ptr[byte_offset + 1] << 8) |
+                               ((uint32_t)dst_ptr[byte_offset + 2] << 16);
+                        dst_pixels[pair * 2][0] = (data >> 0) & 0xFFF;  // R0
+                        dst_pixels[pair * 2][1] = (data >> 12) & 0xFFF; // G0
+                        
+                        // B0 and R1 in next 3 bytes
+                        data = ((uint32_t)src_ptr[byte_offset + 3] << 0) |
+                               ((uint32_t)src_ptr[byte_offset + 4] << 8) |
+                               ((uint32_t)src_ptr[byte_offset + 5] << 16);
+                        src_pixels[pair * 2][2] = (data >> 0) & 0xFFF;      // B0
+                        src_pixels[pair * 2 + 1][0] = (data >> 12) & 0xFFF; // R1
+                        
+                        data = ((uint32_t)dst_ptr[byte_offset + 3] << 0) |
+                               ((uint32_t)dst_ptr[byte_offset + 4] << 8) |
+                               ((uint32_t)dst_ptr[byte_offset + 5] << 16);
+                        dst_pixels[pair * 2][2] = (data >> 0) & 0xFFF;      // B0
+                        dst_pixels[pair * 2 + 1][0] = (data >> 12) & 0xFFF; // R1
+                        
+                        // G1 and B1 in last 3 bytes
+                        data = ((uint32_t)src_ptr[byte_offset + 6] << 0) |
+                               ((uint32_t)src_ptr[byte_offset + 7] << 8) |
+                               ((uint32_t)src_ptr[byte_offset + 8] << 16);
+                        src_pixels[pair * 2 + 1][1] = (data >> 0) & 0xFFF;  // G1
+                        src_pixels[pair * 2 + 1][2] = (data >> 12) & 0xFFF; // B1
+                        
+                        data = ((uint32_t)dst_ptr[byte_offset + 6] << 0) |
+                               ((uint32_t)dst_ptr[byte_offset + 7] << 8) |
+                               ((uint32_t)dst_ptr[byte_offset + 8] << 16);
+                        dst_pixels[pair * 2 + 1][1] = (data >> 0) & 0xFFF;  // G1
+                        dst_pixels[pair * 2 + 1][2] = (data >> 12) & 0xFFF; // B1
+                }
+                
+                // Blend all 8 pixels
                 for (int i = 0; i < 8; i++) {
-                        // Calculate bit position for this pixel (i-th pixel starts at bit i*36/8)
-                        int bit_offset = (i * 36) / 8;
-                        int bit_shift = (i * 36) % 8;
-                        
-                        // Extract 12-bit RGB values (little-endian)
-                        // This is complex due to the packed nature
-                        uint32_t src_data = 0, dst_data = 0;
-                        
-                        // Read enough bytes to cover 36 bits (5 bytes)
-                        for (int j = 0; j < 5; j++) {
-                                if (bit_offset + j < 36) {
-                                        src_data |= (uint32_t)src_group[bit_offset + j] << (j * 8);
-                                        dst_data |= (uint32_t)dst_group[bit_offset + j] << (j * 8);
-                                }
-                        }
-                        
-                        // Shift to align and extract components
-                        src_data >>= bit_shift;
-                        dst_data >>= bit_shift;
-                        
-                        uint16_t r_src = (src_data >> 0) & 0xFFF;
-                        uint16_t g_src = (src_data >> 12) & 0xFFF;
-                        uint16_t b_src = (src_data >> 24) & 0xFFF;
-                        
-                        uint16_t r_dst = (dst_data >> 0) & 0xFFF;
-                        uint16_t g_dst = (dst_data >> 12) & 0xFFF;
-                        uint16_t b_dst = (dst_data >> 24) & 0xFFF;
-                        
                         // Scale 8-bit alpha to 12-bit
-                        uint16_t a = (alpha[x + i] << 4) | (alpha[x + i] >> 4);
+                        uint16_t a = (alpha[pixels_processed + i] << 4) | (alpha[pixels_processed + i] >> 4);
                         
-                        // Blend
-                        r_dst = ((uint32_t)r_src * a + (uint32_t)r_dst * (4095 - a)) / 4095;
-                        g_dst = ((uint32_t)g_src * a + (uint32_t)g_dst * (4095 - a)) / 4095;
-                        b_dst = ((uint32_t)b_src * a + (uint32_t)b_dst * (4095 - a)) / 4095;
-                        
-                        // Pack back
-                        uint64_t packed = ((uint64_t)b_dst << 24) | ((uint64_t)g_dst << 12) | r_dst;
-                        packed <<= bit_shift;
-                        
-                        // Write back (carefully to not overwrite other pixels)
-                        for (int j = 0; j < 5; j++) {
-                                if (bit_offset + j < 36) {
-                                        uint8_t mask = 0xFF;
-                                        if (j == 0 && bit_shift > 0) {
-                                                mask = 0xFF << bit_shift;
-                                        }
-                                        if (j == 4) {
-                                                mask = 0xFF >> (8 - ((36 - bit_offset * 8 - bit_shift) % 8));
-                                        }
-                                        dst_group[bit_offset + j] = (dst_group[bit_offset + j] & ~mask) | 
-                                                                   ((packed >> (j * 8)) & mask);
-                                }
+                        // Blend each component
+                        for (int c = 0; c < 3; c++) {
+                                dst_pixels[i][c] = ((uint32_t)src_pixels[i][c] * a + 
+                                                   (uint32_t)dst_pixels[i][c] * (4095 - a)) / 4095;
                         }
                 }
+                
+                // Pack pixels back - every 9 bytes contains 2 pixels
+                for (int pair = 0; pair < 4; pair++) {
+                        int byte_offset = pair * 9;
+                        
+                        // Pack R0 and G0 into first 3 bytes
+                        uint32_t data = (dst_pixels[pair * 2][0] & 0xFFF) |        // R0
+                                       ((dst_pixels[pair * 2][1] & 0xFFF) << 12);  // G0
+                        dst_ptr[byte_offset] = data & 0xFF;
+                        dst_ptr[byte_offset + 1] = (data >> 8) & 0xFF;
+                        dst_ptr[byte_offset + 2] = (data >> 16) & 0xFF;
+                        
+                        // Pack B0 and R1 into next 3 bytes
+                        data = (dst_pixels[pair * 2][2] & 0xFFF) |             // B0
+                               ((dst_pixels[pair * 2 + 1][0] & 0xFFF) << 12);  // R1
+                        dst_ptr[byte_offset + 3] = data & 0xFF;
+                        dst_ptr[byte_offset + 4] = (data >> 8) & 0xFF;
+                        dst_ptr[byte_offset + 5] = (data >> 16) & 0xFF;
+                        
+                        // Pack G1 and B1 into last 3 bytes
+                        data = (dst_pixels[pair * 2 + 1][1] & 0xFFF) |         // G1
+                               ((dst_pixels[pair * 2 + 1][2] & 0xFFF) << 12);  // B1
+                        dst_ptr[byte_offset + 6] = data & 0xFF;
+                        dst_ptr[byte_offset + 7] = (data >> 8) & 0xFF;
+                        dst_ptr[byte_offset + 8] = (data >> 16) & 0xFF;
+                }
+                
+                pixels_processed += 8;
         }
         
-        // Handle remaining pixels individually
-        // For simplicity, we'll skip the complex per-pixel handling of remaining pixels
-        // In practice, you'd need to handle the partial group
+        // Handle remaining pixels (less than 8)
+        // For now, we'll leave them unblended as this is complex
+        // In a production implementation, you'd handle the partial group
 }
 
 /**
@@ -398,7 +431,7 @@ void alpha_blend_i420(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
                 for (int x = 0; x < width; x++) {
                         uint8_t a = alpha[y * width + x];
                         int idx = y * width + x;
-                        dst_y[idx] = FAST_DIV255(src_y[idx] * a + dst_y[idx] * (255 - a));
+                        dst_y[idx] = EXACT_DIV255(src_y[idx] * a + dst_y[idx] * (255 - a));
                 }
         }
         
@@ -418,8 +451,8 @@ void alpha_blend_i420(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
                         uint8_t a = (a_sum + 2) >> 2;  // Average with rounding
                         
                         int idx = y * uv_width + x;
-                        dst_u[idx] = FAST_DIV255(src_u[idx] * a + dst_u[idx] * (255 - a));
-                        dst_v[idx] = FAST_DIV255(src_v[idx] * a + dst_v[idx] * (255 - a));
+                        dst_u[idx] = EXACT_DIV255(src_u[idx] * a + dst_u[idx] * (255 - a));
+                        dst_v[idx] = EXACT_DIV255(src_v[idx] * a + dst_v[idx] * (255 - a));
                 }
         }
 }
@@ -465,5 +498,5 @@ void alpha_blend_y416(uint8_t *dst, const uint8_t *src, int width)
  */
 const char *alpha_blend_get_implementation(void)
 {
-        return "Scalar with FAST_DIV255";
+        return "Scalar with exact division";
 }

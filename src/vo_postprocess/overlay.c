@@ -500,8 +500,8 @@ static void *overlay_init(const char *config) {
                         s->overlay_width, s->overlay_height);
         }
         
-        // Report which SIMD optimization is available
-        log_msg(LOG_LEVEL_INFO, MOD_NAME "Using %s SIMD optimization for alpha blending\n", 
+        // Report which implementation is being used
+        log_msg(LOG_LEVEL_INFO, MOD_NAME "Using %s for alpha blending\n", 
                 alpha_blend_get_implementation());
         
         return s;

@@ -1143,6 +1143,200 @@ static void benchmark_r10k_blending()
     free(alpha);
 }
 
+static void test_r12l_blending()
+{
+    printf("\n=== Testing R12L Blending ===\n");
+    
+    // R12L format: 36 bytes for 8 pixels (12 bits per component)
+    // 8 pixels * 36 bits per pixel = 288 bits = 36 bytes
+    // Every 9 bytes contains 2 pixels (72 bits = 2 * 36 bits)
+    
+    uint8_t dst[36] = {0}; // 8 pixels
+    uint8_t src[36] = {0};
+    uint8_t alpha[8] = {128, 128, 128, 128, 128, 128, 128, 128}; // 50% alpha for all
+    
+    // Pack test values into R12L format using the same logic as alpha_blend_r12l
+    uint16_t dst_r = 3000, dst_g = 2000, dst_b = 1000; // 12-bit values
+    uint16_t src_r = 300, src_g = 200, src_b = 100;    // 12-bit values
+    
+    // Pack all 8 pixels with the same values for simplicity
+    for (int pair = 0; pair < 4; pair++) {
+        int byte_offset = pair * 9;
+        
+        // Pack destination pixels
+        // R0 and G0 in first 3 bytes
+        uint32_t data = (dst_r & 0xFFF) | ((dst_g & 0xFFF) << 12);
+        dst[byte_offset] = data & 0xFF;
+        dst[byte_offset + 1] = (data >> 8) & 0xFF;
+        dst[byte_offset + 2] = (data >> 16) & 0xFF;
+        
+        // B0 and R1 in next 3 bytes
+        data = (dst_b & 0xFFF) | ((dst_r & 0xFFF) << 12);
+        dst[byte_offset + 3] = data & 0xFF;
+        dst[byte_offset + 4] = (data >> 8) & 0xFF;
+        dst[byte_offset + 5] = (data >> 16) & 0xFF;
+        
+        // G1 and B1 in last 3 bytes
+        data = (dst_g & 0xFFF) | ((dst_b & 0xFFF) << 12);
+        dst[byte_offset + 6] = data & 0xFF;
+        dst[byte_offset + 7] = (data >> 8) & 0xFF;
+        dst[byte_offset + 8] = (data >> 16) & 0xFF;
+        
+        // Pack source pixels
+        // R0 and G0 in first 3 bytes
+        data = (src_r & 0xFFF) | ((src_g & 0xFFF) << 12);
+        src[byte_offset] = data & 0xFF;
+        src[byte_offset + 1] = (data >> 8) & 0xFF;
+        src[byte_offset + 2] = (data >> 16) & 0xFF;
+        
+        // B0 and R1 in next 3 bytes
+        data = (src_b & 0xFFF) | ((src_r & 0xFFF) << 12);
+        src[byte_offset + 3] = data & 0xFF;
+        src[byte_offset + 4] = (data >> 8) & 0xFF;
+        src[byte_offset + 5] = (data >> 16) & 0xFF;
+        
+        // G1 and B1 in last 3 bytes
+        data = (src_g & 0xFFF) | ((src_b & 0xFFF) << 12);
+        src[byte_offset + 6] = data & 0xFF;
+        src[byte_offset + 7] = (data >> 8) & 0xFF;
+        src[byte_offset + 8] = (data >> 16) & 0xFF;
+    }
+    
+    printf("Before blend - dst R=%d G=%d B=%d (12-bit)\n", dst_r, dst_g, dst_b);
+    printf("Before blend - src R=%d G=%d B=%d (12-bit)\n", src_r, src_g, src_b);
+    
+    // Debug: Print raw bytes before blend
+    printf("Raw dst bytes before: ");
+    for (int i = 0; i < 9; i++) printf("%02x ", dst[i]);
+    printf("\n");
+    
+    // Test alpha blending
+    alpha_blend_r12l(dst, src, alpha, 8);
+    
+    // Debug: Print raw bytes after blend
+    printf("Raw dst bytes after:  ");
+    for (int i = 0; i < 9; i++) printf("%02x ", dst[i]);
+    printf("\n");
+    
+    // Unpack first pixel to check result
+    uint32_t data = ((uint32_t)dst[0] << 0) |
+                   ((uint32_t)dst[1] << 8) |
+                   ((uint32_t)dst[2] << 16);
+    uint16_t result_r = (data >> 0) & 0xFFF;
+    uint16_t result_g = (data >> 12) & 0xFFF;
+    
+    data = ((uint32_t)dst[3] << 0) |
+           ((uint32_t)dst[4] << 8) |
+           ((uint32_t)dst[5] << 16);
+    uint16_t result_b = (data >> 0) & 0xFFF;
+    
+    printf("After blend  - dst R=%d G=%d B=%d (12-bit)\n", result_r, result_g, result_b);
+    
+    // Expected: ~50% blend
+    // Alpha 128 is scaled to 12-bit: (128 << 4) | (128 >> 4) = 2048 | 8 = 2056
+    // Blend: (src * 2056 + dst * (4095 - 2056)) / 4095
+    uint16_t scaled_alpha = (128 << 4) | (128 >> 4);  // 2056
+    uint16_t expected_r = ((uint32_t)src_r * scaled_alpha + (uint32_t)dst_r * (4095 - scaled_alpha)) / 4095;
+    uint16_t expected_g = ((uint32_t)src_g * scaled_alpha + (uint32_t)dst_g * (4095 - scaled_alpha)) / 4095;
+    uint16_t expected_b = ((uint32_t)src_b * scaled_alpha + (uint32_t)dst_b * (4095 - scaled_alpha)) / 4095;
+    
+    printf("Scaled alpha: %d (from 8-bit %d)\n", scaled_alpha, 128);
+    printf("Expected R ~%d, got %d, diff=%d %s\n", expected_r, result_r, 
+           abs(expected_r - result_r), (abs(expected_r - result_r) <= 2) ? "✓" : "✗");
+    printf("\n");
+}
+
+static void benchmark_r12l_blending()
+{
+    printf("\n=== Benchmarking R12L Blending ===\n");
+    
+    const int width = 1920;
+    const int height = 1080;
+    const int iterations = 100;
+    // R12L: 36 bytes for 8 pixels, so width pixels need (width/8)*36 bytes
+    const int r12l_size = (width / 8) * 36 * height;
+    
+    uint8_t *dst = malloc(r12l_size);
+    uint8_t *src = malloc(r12l_size);
+    uint8_t *dst_copy = malloc(r12l_size);
+    uint8_t *alpha = malloc(width * height);
+    
+    if (!dst || !src || !dst_copy || !alpha) {
+        printf("Failed to allocate memory for benchmark\n");
+        free(dst);
+        free(src);
+        free(dst_copy);
+        free(alpha);
+        return;
+    }
+    
+    // Initialize with random data
+    for (int i = 0; i < r12l_size; i++) {
+        dst[i] = rand() & 0xFF;
+        src[i] = rand() & 0xFF;
+        dst_copy[i] = dst[i];
+    }
+    for (int i = 0; i < width * height; i++) {
+        alpha[i] = rand() & 0xFF;
+    }
+    
+    // R12L doesn't have a separate scalar implementation in our test,
+    // so we'll just test the main implementation twice for consistency
+    
+    // Test implementation
+    printf("Scalar:\n");
+    clock_t start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_r12l(dst_copy + y * (width / 8) * 36, 
+                           src + y * (width / 8) * 36, 
+                           alpha + y * width, width);
+        }
+    }
+    
+    clock_t end = clock();
+    double elapsed_scalar = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_scalar = 1.0 / (elapsed_scalar / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_scalar);
+    printf("  Average: %.3f ms per frame\n", elapsed_scalar * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_scalar * 1000000.0));
+    print_resolution_frame_rates(fps_scalar);
+    
+    // Reset data for optimized test
+    for (int i = 0; i < r12l_size; i++) {
+        dst[i] = dst_copy[i];
+    }
+    
+    // Test optimized implementation (same as scalar for now)
+    printf("Optimized (%s):\n", alpha_blend_get_implementation());
+    start = clock();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int y = 0; y < height; y++) {
+            alpha_blend_r12l(dst + y * (width / 8) * 36, 
+                           src + y * (width / 8) * 36, 
+                           alpha + y * width, width);
+        }
+    }
+    
+    end = clock();
+    double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    double fps_opt = 1.0 / (elapsed_opt / iterations);
+    
+    printf("  Blended %d frames of %dx%d in %.3f seconds\n", iterations, width, height, elapsed_opt);
+    printf("  Average: %.3f ms per frame\n", elapsed_opt * 1000.0 / iterations);
+    printf("  Throughput: %.1f megapixels/second\n", (width * height * iterations) / (elapsed_opt * 1000000.0));
+    print_resolution_frame_rates(fps_opt);
+    printf("  Speedup: %.1fx\n", elapsed_scalar / elapsed_opt);
+    
+    free(dst);
+    free(src);
+    free(dst_copy);
+    free(alpha);
+}
+
 static void alpha_blend_i420_scalar(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
                                     const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
                                     const uint8_t *alpha, int width, int height)
@@ -1578,6 +1772,7 @@ int main()
     test_rgb_optimized();
     test_v210_blending();
     test_r10k_blending();
+    test_r12l_blending();
     test_i420_blending();
     test_y416_blending();
     
@@ -1588,6 +1783,7 @@ int main()
     benchmark_rgb_blending();
     benchmark_v210_blending();
     benchmark_r10k_blending();
+    benchmark_r12l_blending();
     benchmark_i420_blending();
     benchmark_y416_blending();
     

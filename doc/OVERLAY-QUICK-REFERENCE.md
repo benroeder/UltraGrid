@@ -51,7 +51,7 @@ FEATURES
 --------
 ✓ Dynamic reloading (file changes detected automatically)
 ✓ Alpha transparency support
-✓ SIMD optimization (SSE2/AVX2/ARM NEON)
+✓ Optimized scalar implementation with exact division
 ✓ Automatic scaling to video resolution
 ✓ Flexible positioning
 ✓ Performance monitoring

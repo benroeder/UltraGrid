@@ -51,8 +51,8 @@ extern "C" {
  * Blends source RGBA pixels onto destination RGBA pixels using the alpha channel
  * from the source. Formula: dst = src * alpha + dst * (1 - alpha)
  * 
- * The implementation automatically uses the best available SIMD instructions
- * (AVX2, SSE2, or NEON) for optimal performance.
+ * Uses optimized scalar implementation with exact division for precise results
+ * without aliasing artifacts.
  * 
  * @param dst   Destination RGBA buffer (modified in place)
  * @param src   Source RGBA buffer with alpha channel
@@ -172,7 +172,7 @@ void alpha_blend_y416(uint8_t *dst, const uint8_t *src, int width);
  * 
  * Useful for debugging and performance analysis.
  * 
- * @return String describing the implementation (e.g., "AVX2", "SSE2", "NEON", "scalar")
+ * @return String describing the implementation (currently "Scalar with exact division")
  */
 const char *alpha_blend_get_implementation(void);
 
