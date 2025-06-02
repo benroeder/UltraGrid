@@ -37,6 +37,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -81,6 +82,20 @@ enum position {
         POS_BOTTOM_RIGHT
 };
 
+enum edge_type {
+        EDGE_LINEAR,
+        EDGE_GAUSSIAN,
+        EDGE_COSINE
+};
+
+enum edge_side {
+        EDGE_LEFT   = 1 << 0,
+        EDGE_RIGHT  = 1 << 1,
+        EDGE_TOP    = 1 << 2,
+        EDGE_BOTTOM = 1 << 3,
+        EDGE_ALL    = EDGE_LEFT | EDGE_RIGHT | EDGE_TOP | EDGE_BOTTOM
+};
+
 struct state_overlay {
         struct video_desc saved_desc;
         struct video_frame *in;
@@ -115,6 +130,11 @@ struct state_overlay {
         unsigned int sws_src_width;     // Last source width used for sws context
         unsigned int sws_src_height;    // Last source height used for sws context
         
+        // Soft edge settings
+        int edge_width;                 // Width of soft edge in pixels (0 = disabled)
+        enum edge_type edge_type;       // Type of gradient (default: linear)
+        int edge_sides;                 // Bitmask of which edges to soften (default: all)
+        
         // Performance monitoring
         struct {
                 long long total_time_ns;        // Total processing time
@@ -145,22 +165,96 @@ static bool overlay_get_property(void *state, int property, void *val, size_t *l
 static void print_help() {
         color_printf("Overlay postprocessor overlays a PAM image onto video frames.\n");
         color_printf("\nUsage:\n");
-        color_printf(TERM_BOLD TERM_FG_RED "\t-p overlay" TERM_FG_RESET "[:file=<path>][:position=<pos>][:x=<x>][:y=<y>][:scale=<mode>][:perf]\n" TERM_RESET);
+        color_printf(TERM_BOLD TERM_FG_RED "\t-p overlay" TERM_FG_RESET "[:file=<path>][:position=<pos>][:x=<x>][:y=<y>][:scale=<mode>][:edge=<width>][:edge_type=<type>][:edge_sides=<sides>][:perf]\n" TERM_RESET);
         color_printf("\nParameters:\n");
         color_printf(TERM_BOLD "\tfile=<path>" TERM_RESET " - Path to PAM overlay image (default: overlay.pam)\n");
         color_printf(TERM_BOLD "\tposition=<pos>" TERM_RESET " - Overlay position: center, topleft, topright, bottomleft, bottomright (default: center)\n");
         color_printf(TERM_BOLD "\tx=<x>" TERM_RESET " - Custom X position in pixels (overrides position parameter)\n");
         color_printf(TERM_BOLD "\ty=<y>" TERM_RESET " - Custom Y position in pixels (overrides position parameter)\n");
         color_printf(TERM_BOLD "\tscale=<mode>" TERM_RESET " - Scaling mode: fit, none (default: fit)\n");
+        color_printf(TERM_BOLD "\tedge=<width>" TERM_RESET " - Soft edge width in pixels (default: 0 = disabled)\n");
+        color_printf(TERM_BOLD "\tedge_type=<type>" TERM_RESET " - Edge gradient type: linear, gaussian, cosine (default: linear)\n");
+        color_printf(TERM_BOLD "\tedge_sides=<sides>" TERM_RESET " - Which edges to soften: all, left, right, top, bottom (default: all)\n");
+        color_printf("                                Can combine multiple sides with commas: left,right\n");
         color_printf(TERM_BOLD "\tperf" TERM_RESET " - Enable performance monitoring (reports every 5 seconds)\n");
         color_printf("\nExamples:\n");
         color_printf(TERM_BOLD "\tuv -t testcard -p overlay:file=logo.pam:position=topright -d sdl\n" TERM_RESET);
         color_printf(TERM_BOLD "\tuv -t testcard -p overlay:file=logo.pam:x=100:y=50:perf -d sdl\n" TERM_RESET);
+        color_printf(TERM_BOLD "\tuv -t testcard -p overlay:file=logo.pam:edge=50:edge_type=gaussian -d sdl\n" TERM_RESET);
         color_printf("\nNotes:\n");
         color_printf(" - Overlay image should be in PAM format with alpha channel\n");
         color_printf(" - Image is reloaded automatically when file is modified\n");
         color_printf(" - Uses alpha channel for transparency\n");
         color_printf(" - Negative X/Y values position from right/bottom edges\n");
+        color_printf(" - Soft edges create a gradual transparency transition at overlay borders\n");
+}
+
+static const char *edge_type_to_string(enum edge_type type) {
+        switch (type) {
+        case EDGE_LINEAR:
+                return "linear";
+        case EDGE_GAUSSIAN:
+                return "gaussian";
+        case EDGE_COSINE:
+                return "cosine";
+        default:
+                return "unknown";
+        }
+}
+
+static float apply_gradient(float t, enum edge_type type) {
+        switch (type) {
+        case EDGE_LINEAR:
+                return t;
+        case EDGE_GAUSSIAN:
+                // Gaussian curve with adjustable steepness
+                return expf(-powf(1.0f - t, 2) / (2 * 0.3f * 0.3f));
+        case EDGE_COSINE:
+                // Smooth S-curve
+                return 0.5f * (1.0f + cosf(M_PI * (1.0f - t)));
+        default:
+                return t;
+        }
+}
+
+static void apply_soft_edges(unsigned char *rgba_data, int width, int height,
+                             int edge_width, enum edge_type type, int edge_sides) {
+        // No processing if edge width is 0 or negative (maintains current behavior)
+        if (edge_width <= 0) return;
+        
+        for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                        float alpha_modifier = 1.0f;
+                        
+                        // Calculate distances from edges
+                        int dist_left = x;
+                        int dist_right = width - 1 - x;
+                        int dist_top = y;
+                        int dist_bottom = height - 1 - y;
+                        
+                        // Apply edge gradients based on selected sides
+                        if (edge_sides & EDGE_LEFT && dist_left < edge_width) {
+                                float t = (float)dist_left / edge_width;
+                                alpha_modifier = MIN(alpha_modifier, apply_gradient(t, type));
+                        }
+                        if (edge_sides & EDGE_RIGHT && dist_right < edge_width) {
+                                float t = (float)dist_right / edge_width;
+                                alpha_modifier = MIN(alpha_modifier, apply_gradient(t, type));
+                        }
+                        if (edge_sides & EDGE_TOP && dist_top < edge_width) {
+                                float t = (float)dist_top / edge_width;
+                                alpha_modifier = MIN(alpha_modifier, apply_gradient(t, type));
+                        }
+                        if (edge_sides & EDGE_BOTTOM && dist_bottom < edge_width) {
+                                float t = (float)dist_bottom / edge_width;
+                                alpha_modifier = MIN(alpha_modifier, apply_gradient(t, type));
+                        }
+                        
+                        // Apply alpha modification
+                        int pixel_offset = (y * width + x) * 4;
+                        rgba_data[pixel_offset + 3] = (unsigned char)(rgba_data[pixel_offset + 3] * alpha_modifier);
+                }
+        }
 }
 
 static bool load_overlay_image(struct state_overlay *s) {
@@ -363,6 +457,15 @@ static bool load_overlay_image(struct state_overlay *s) {
         s->last_modified_nsec = 0;
 #endif
         
+        // Apply soft edges if configured
+        // Only processes if edge_width > 0, maintaining current behavior otherwise
+        if (s->edge_width > 0) {
+                apply_soft_edges(s->overlay_data, s->overlay_width, s->overlay_height,
+                                 s->edge_width, s->edge_type, s->edge_sides);
+                log_msg(LOG_LEVEL_INFO, MOD_NAME "Applied soft edges: width=%d, type=%s\n", 
+                        s->edge_width, edge_type_to_string(s->edge_type));
+        }
+        
         // Invalidate scaled cache
         free(s->scaled_overlay);
         s->scaled_overlay = NULL;
@@ -402,6 +505,11 @@ static void *overlay_init(const char *config) {
         s->error_count = 0;
         s->sws_src_width = 0;
         s->sws_src_height = 0;
+        
+        // Soft edge defaults (maintain current behavior when not used)
+        s->edge_width = 0;              // Disabled by default
+        s->edge_type = EDGE_LINEAR;     // Default gradient type
+        s->edge_sides = EDGE_ALL;       // All sides by default
         
         // Parse help
         if (strlen(config) > 0 && strcmp(config, "help") == 0) {
@@ -475,6 +583,71 @@ static void *overlay_init(const char *config) {
                                 s->perf.enabled = true;
                                 s->perf.last_report_time = time(NULL);
                                 log_msg(LOG_LEVEL_INFO, MOD_NAME "Performance monitoring enabled\n");
+                        } else if (strncasecmp(item, "edge=", 5) == 0) {
+                                s->edge_width = atoi(item + 5);
+                                if (s->edge_width < 0) {
+                                        log_msg(LOG_LEVEL_WARNING, MOD_NAME "Edge width cannot be negative, setting to 0\n");
+                                        s->edge_width = 0;
+                                }
+                        } else if (strncasecmp(item, "edge_type=", 10) == 0) {
+                                const char *type = item + 10;
+                                if (strcasecmp(type, "linear") == 0) {
+                                        s->edge_type = EDGE_LINEAR;
+                                } else if (strcasecmp(type, "gaussian") == 0) {
+                                        s->edge_type = EDGE_GAUSSIAN;
+                                } else if (strcasecmp(type, "cosine") == 0) {
+                                        s->edge_type = EDGE_COSINE;
+                                } else {
+                                        log_msg(LOG_LEVEL_ERROR, MOD_NAME "Unknown edge type: %s\n", type);
+                                        free(tmp);
+                                        free(s->overlay_path);
+                                        free(s);
+                                        return NULL;
+                                }
+                        } else if (strncasecmp(item, "edge_sides=", 11) == 0) {
+                                const char *sides_str = item + 11;
+                                s->edge_sides = 0;
+                                
+                                // Parse comma-separated list of sides
+                                char *sides_copy = strdup(sides_str);
+                                if (!sides_copy) {
+                                        log_msg(LOG_LEVEL_ERROR, MOD_NAME "Memory allocation failed\n");
+                                        free(tmp);
+                                        free(s->overlay_path);
+                                        free(s);
+                                        return NULL;
+                                }
+                                
+                                char *side_token, *side_save_ptr;
+                                side_token = strtok_r(sides_copy, ",", &side_save_ptr);
+                                while (side_token) {
+                                        if (strcasecmp(side_token, "all") == 0) {
+                                                s->edge_sides = EDGE_ALL;
+                                                break;  // All overrides individual sides
+                                        } else if (strcasecmp(side_token, "left") == 0) {
+                                                s->edge_sides |= EDGE_LEFT;
+                                        } else if (strcasecmp(side_token, "right") == 0) {
+                                                s->edge_sides |= EDGE_RIGHT;
+                                        } else if (strcasecmp(side_token, "top") == 0) {
+                                                s->edge_sides |= EDGE_TOP;
+                                        } else if (strcasecmp(side_token, "bottom") == 0) {
+                                                s->edge_sides |= EDGE_BOTTOM;
+                                        } else {
+                                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Unknown edge side: %s\n", side_token);
+                                                free(sides_copy);
+                                                free(tmp);
+                                                free(s->overlay_path);
+                                                free(s);
+                                                return NULL;
+                                        }
+                                        side_token = strtok_r(NULL, ",", &side_save_ptr);
+                                }
+                                free(sides_copy);
+                                
+                                // Default to all sides if none specified
+                                if (s->edge_sides == 0) {
+                                        s->edge_sides = EDGE_ALL;
+                                }
                         } else {
                                 log_msg(LOG_LEVEL_ERROR, MOD_NAME "Unknown option: %s\n", item);
                                 free(tmp);
