@@ -182,6 +182,25 @@ With debug logging enabled, you'll see overlay loading messages:
 - **Thread Safety**: Single-threaded processing per frame
 - **Memory Usage**: Approximately `width * height * 4` bytes per overlay
 
+## Testing and Benchmarks
+
+A comprehensive test program is available in `examples/test_alpha_blend.c` that demonstrates and benchmarks the alpha blending functions:
+
+```bash
+cd examples
+make test_alpha_blend
+./test_alpha_blend
+```
+
+The test program includes:
+- Correctness verification for all supported formats
+- Performance benchmarks showing:
+  - Throughput in megapixels/second
+  - Frame rates for HD 720p, HD 1080p, 2K, UHD 4K, Cinema 4K, and 8K
+  - Memory usage for different resolutions
+  - Format comparison (I420 typically fastest due to 4:2:0 subsampling)
+- Tests at actual resolutions (720p through 8K) with memory allocation reporting
+
 ## See Also
 
 - UltraGrid postprocessor documentation

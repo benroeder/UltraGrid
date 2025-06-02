@@ -1694,8 +1694,8 @@ static void benchmark_y416_blending()
 static void benchmark_multi_format()
 {
     printf("\n=== Multi-Format Benchmark (1920x1080) ===\n");
-    printf("Format       Pixels/Format  Time/Frame   Throughput   Frame Rate\n");
-    printf("----------------------------------------------------------------------\n");
+    printf("Format  Time/Frame  Throughput  HD 720p    HD 1080p   2K        UHD 4K    Cinema 4K  8K\n");
+    printf("------------------------------------------------------------------------------------------\n");
     
     const int width = 1920;
     const int height = 1080;
@@ -1721,11 +1721,19 @@ static void benchmark_multi_format()
             double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
             
             double ms_per_frame = (elapsed * 1000.0) / iterations;
-            double fps = 1000.0 / ms_per_frame;
+            double fps_1080p = 1000.0 / ms_per_frame;
             double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
             
-            printf("%-12s %dx%d RGBA  %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
-                   "RGBA", width, height, ms_per_frame, megapixels_per_sec, fps);
+            // Calculate frame rates for different resolutions
+            double fps_720p = megapixels_per_sec * 1e6 / (1280.0 * 720.0);
+            double fps_2k = megapixels_per_sec * 1e6 / (2048.0 * 1152.0);
+            double fps_uhd4k = megapixels_per_sec * 1e6 / (3840.0 * 2160.0);
+            double fps_cinema4k = megapixels_per_sec * 1e6 / (4096.0 * 2160.0);
+            double fps_8k = megapixels_per_sec * 1e6 / (7680.0 * 4320.0);
+            
+            printf("%-6s  %6.2f ms   %6.1f MP/s  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f\n", 
+                   "RGBA", ms_per_frame, megapixels_per_sec, 
+                   fps_720p, fps_1080p, fps_2k, fps_uhd4k, fps_cinema4k, fps_8k);
         }
         free(dst);
         free(src);
@@ -1757,11 +1765,19 @@ static void benchmark_multi_format()
             double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
             
             double ms_per_frame = (elapsed * 1000.0) / iterations;
-            double fps = 1000.0 / ms_per_frame;
+            double fps_1080p = 1000.0 / ms_per_frame;
             double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
             
-            printf("%-12s %dx%d UYVY  %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
-                   "UYVY", width, height, ms_per_frame, megapixels_per_sec, fps);
+            // Calculate frame rates for different resolutions
+            double fps_720p = megapixels_per_sec * 1e6 / (1280.0 * 720.0);
+            double fps_2k = megapixels_per_sec * 1e6 / (2048.0 * 1152.0);
+            double fps_uhd4k = megapixels_per_sec * 1e6 / (3840.0 * 2160.0);
+            double fps_cinema4k = megapixels_per_sec * 1e6 / (4096.0 * 2160.0);
+            double fps_8k = megapixels_per_sec * 1e6 / (7680.0 * 4320.0);
+            
+            printf("%-6s  %6.2f ms   %6.1f MP/s  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f\n", 
+                   "UYVY", ms_per_frame, megapixels_per_sec, 
+                   fps_720p, fps_1080p, fps_2k, fps_uhd4k, fps_cinema4k, fps_8k);
         }
         free(dst);
         free(src);
@@ -1794,11 +1810,19 @@ static void benchmark_multi_format()
             double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
             
             double ms_per_frame = (elapsed * 1000.0) / iterations;
-            double fps = 1000.0 / ms_per_frame;
+            double fps_1080p = 1000.0 / ms_per_frame;
             double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
             
-            printf("%-12s %dx%d RGB   %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
-                   "RGB", width, height, ms_per_frame, megapixels_per_sec, fps);
+            // Calculate frame rates for different resolutions
+            double fps_720p = megapixels_per_sec * 1e6 / (1280.0 * 720.0);
+            double fps_2k = megapixels_per_sec * 1e6 / (2048.0 * 1152.0);
+            double fps_uhd4k = megapixels_per_sec * 1e6 / (3840.0 * 2160.0);
+            double fps_cinema4k = megapixels_per_sec * 1e6 / (4096.0 * 2160.0);
+            double fps_8k = megapixels_per_sec * 1e6 / (7680.0 * 4320.0);
+            
+            printf("%-6s  %6.2f ms   %6.1f MP/s  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f\n", 
+                   "RGB", ms_per_frame, megapixels_per_sec, 
+                   fps_720p, fps_1080p, fps_2k, fps_uhd4k, fps_cinema4k, fps_8k);
         }
         free(dst);
         free(src);
@@ -1838,11 +1862,19 @@ static void benchmark_multi_format()
             double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
             
             double ms_per_frame = (elapsed * 1000.0) / iterations;
-            double fps = 1000.0 / ms_per_frame;
+            double fps_1080p = 1000.0 / ms_per_frame;
             double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
             
-            printf("%-12s %dx%d I420  %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
-                   "I420", width, height, ms_per_frame, megapixels_per_sec, fps);
+            // Calculate frame rates for different resolutions
+            double fps_720p = megapixels_per_sec * 1e6 / (1280.0 * 720.0);
+            double fps_2k = megapixels_per_sec * 1e6 / (2048.0 * 1152.0);
+            double fps_uhd4k = megapixels_per_sec * 1e6 / (3840.0 * 2160.0);
+            double fps_cinema4k = megapixels_per_sec * 1e6 / (4096.0 * 2160.0);
+            double fps_8k = megapixels_per_sec * 1e6 / (7680.0 * 4320.0);
+            
+            printf("%-6s  %6.2f ms   %6.1f MP/s  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f\n", 
+                   "I420", ms_per_frame, megapixels_per_sec, 
+                   fps_720p, fps_1080p, fps_2k, fps_uhd4k, fps_cinema4k, fps_8k);
         }
         free(dst_y); free(dst_u); free(dst_v);
         free(src_y); free(src_u); free(src_v);
@@ -1877,11 +1909,19 @@ static void benchmark_multi_format()
             double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
             
             double ms_per_frame = (elapsed * 1000.0) / iterations;
-            double fps = 1000.0 / ms_per_frame;
+            double fps_1080p = 1000.0 / ms_per_frame;
             double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
             
-            printf("%-12s %dx%d v210  %6.2f ms    %7.1f MP/s  %7.1f fps\n", 
-                   "v210", width, height, ms_per_frame, megapixels_per_sec, fps);
+            // Calculate frame rates for different resolutions
+            double fps_720p = megapixels_per_sec * 1e6 / (1280.0 * 720.0);
+            double fps_2k = megapixels_per_sec * 1e6 / (2048.0 * 1152.0);
+            double fps_uhd4k = megapixels_per_sec * 1e6 / (3840.0 * 2160.0);
+            double fps_cinema4k = megapixels_per_sec * 1e6 / (4096.0 * 2160.0);
+            double fps_8k = megapixels_per_sec * 1e6 / (7680.0 * 4320.0);
+            
+            printf("%-6s  %6.2f ms   %6.1f MP/s  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f  %7.1f\n", 
+                   "v210", ms_per_frame, megapixels_per_sec, 
+                   fps_720p, fps_1080p, fps_2k, fps_uhd4k, fps_cinema4k, fps_8k);
         }
         free(dst);
         free(src);
@@ -1889,6 +1929,159 @@ static void benchmark_multi_format()
     }
     
     printf("\nNote: I420 has lower bandwidth requirements due to 4:2:0 chroma subsampling\n");
+}
+
+// Test each format at different actual resolutions
+static void benchmark_formats_at_resolutions()
+{
+    typedef struct {
+        const char *name;
+        int width;
+        int height;
+    } resolution_t;
+    
+    const resolution_t resolutions[] = {
+        {"HD 720p", 1280, 720},
+        {"HD 1080p", 1920, 1080},
+        {"UHD 4K", 3840, 2160},
+        {"8K", 7680, 4320}
+    };
+    
+    printf("\n=== Testing Each Format at Actual Resolutions ===\n");
+    printf("(Memory usage shown in MB)\n\n");
+    
+    for (size_t r = 0; r < sizeof(resolutions) / sizeof(resolutions[0]); r++) {
+        const int width = resolutions[r].width;
+        const int height = resolutions[r].height;
+        const int pixels = width * height;
+        const int iterations = (pixels > 10000000) ? 5 : 20; // Fewer iterations for 4K/8K
+        
+        printf("Resolution: %s (%dx%d)\n", resolutions[r].name, width, height);
+        printf("Format  Memory    Time/Frame  Throughput  Frame Rate\n");
+        printf("-------------------------------------------------------\n");
+        
+        // Test RGBA
+        {
+            size_t mem_size = pixels * 4 * 2 + pixels; // dst + src + alpha
+            uint8_t *dst = malloc(pixels * 4);
+            uint8_t *src = malloc(pixels * 4);
+            
+            if (dst && src) {
+                for (int i = 0; i < pixels * 4; i++) {
+                    dst[i] = rand() & 0xFF;
+                    src[i] = rand() & 0xFF;
+                }
+                
+                clock_t start = clock();
+                for (int i = 0; i < iterations; i++) {
+                    alpha_blend_rgba(dst, src, pixels);
+                }
+                clock_t end = clock();
+                double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+                
+                double ms_per_frame = (elapsed * 1000.0) / iterations;
+                double fps = 1000.0 / ms_per_frame;
+                double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+                
+                printf("RGBA    %5.1f MB  %6.2f ms   %6.1f MP/s  %7.1f fps\n", 
+                       mem_size / (1024.0 * 1024.0), ms_per_frame, megapixels_per_sec, fps);
+            } else {
+                printf("RGBA    Memory allocation failed\n");
+            }
+            free(dst);
+            free(src);
+        }
+        
+        // Test I420
+        {
+            int y_size = pixels;
+            int chroma_size = pixels / 4;
+            size_t mem_size = (y_size + chroma_size * 2) * 2 + y_size; // dst + src + alpha
+            
+            uint8_t *dst_y = malloc(y_size);
+            uint8_t *dst_u = malloc(chroma_size);
+            uint8_t *dst_v = malloc(chroma_size);
+            uint8_t *src_y = malloc(y_size);
+            uint8_t *src_u = malloc(chroma_size);
+            uint8_t *src_v = malloc(chroma_size);
+            uint8_t *alpha = malloc(y_size);
+            
+            if (dst_y && dst_u && dst_v && src_y && src_u && src_v && alpha) {
+                // Initialize with random data
+                for (int i = 0; i < y_size; i++) {
+                    dst_y[i] = rand() & 0xFF;
+                    src_y[i] = rand() & 0xFF;
+                    alpha[i] = rand() & 0xFF;
+                }
+                for (int i = 0; i < chroma_size; i++) {
+                    dst_u[i] = rand() & 0xFF;
+                    dst_v[i] = rand() & 0xFF;
+                    src_u[i] = rand() & 0xFF;
+                    src_v[i] = rand() & 0xFF;
+                }
+                
+                clock_t start = clock();
+                for (int iter = 0; iter < iterations; iter++) {
+                    alpha_blend_i420(dst_y, dst_u, dst_v, src_y, src_u, src_v, alpha, width, height);
+                }
+                clock_t end = clock();
+                double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+                
+                double ms_per_frame = (elapsed * 1000.0) / iterations;
+                double fps = 1000.0 / ms_per_frame;
+                double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+                
+                printf("I420    %5.1f MB  %6.2f ms   %6.1f MP/s  %7.1f fps\n", 
+                       mem_size / (1024.0 * 1024.0), ms_per_frame, megapixels_per_sec, fps);
+            } else {
+                printf("I420    Memory allocation failed\n");
+            }
+            free(dst_y); free(dst_u); free(dst_v);
+            free(src_y); free(src_u); free(src_v);
+            free(alpha);
+        }
+        
+        // Test UYVY
+        {
+            size_t mem_size = pixels * 2 * 2 + pixels; // dst + src + alpha
+            uint8_t *dst = malloc(pixels * 2);
+            uint8_t *src = malloc(pixels * 2);
+            uint8_t *alpha = malloc(pixels);
+            
+            if (dst && src && alpha) {
+                for (int i = 0; i < pixels * 2; i++) {
+                    dst[i] = rand() & 0xFF;
+                    src[i] = rand() & 0xFF;
+                }
+                for (int i = 0; i < pixels; i++) {
+                    alpha[i] = rand() & 0xFF;
+                }
+                
+                clock_t start = clock();
+                for (int iter = 0; iter < iterations; iter++) {
+                    for (int y = 0; y < height; y++) {
+                        alpha_blend_uyvy(dst + y * width * 2, src + y * width * 2, alpha + y * width, width);
+                    }
+                }
+                clock_t end = clock();
+                double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+                
+                double ms_per_frame = (elapsed * 1000.0) / iterations;
+                double fps = 1000.0 / ms_per_frame;
+                double megapixels_per_sec = (pixels * iterations) / (elapsed * 1e6);
+                
+                printf("UYVY    %5.1f MB  %6.2f ms   %6.1f MP/s  %7.1f fps\n", 
+                       mem_size / (1024.0 * 1024.0), ms_per_frame, megapixels_per_sec, fps);
+            } else {
+                printf("UYVY    Memory allocation failed\n");
+            }
+            free(dst);
+            free(src);
+            free(alpha);
+        }
+        
+        printf("\n");
+    }
 }
 
 // Multi-resolution benchmark
@@ -1993,6 +2186,9 @@ int main()
     
     // Run multi-format benchmark
     benchmark_multi_format();
+    
+    // Test formats at actual resolutions
+    benchmark_formats_at_resolutions();
     
     return 0;
 }
