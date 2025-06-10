@@ -2687,6 +2687,41 @@ if test "$found_zfec" = yes; then
         AC_SUBST(ZFEC_PREFIX)
         zfec=yes
 fi
+
+# RapidCheck configuration
+AC_ARG_ENABLE(rapidcheck,
+              AS_HELP_STRING([--enable-rapidcheck], [enable RapidCheck property-based testing]),
+              [rapidcheck=$enableval],
+              [rapidcheck=auto])
+
+rapidcheck_found=no
+if test "$rapidcheck" != no; then
+        # First check ext-deps
+        if test -f "$srcdir/ext-deps/rapidcheck/include/rapidcheck.h" || test -f "./ext-deps/rapidcheck/include/rapidcheck.h"; then
+                rapidcheck_found=yes
+                RAPIDCHECK_CFLAGS="-I$srcdir/ext-deps/rapidcheck/include"
+        else
+                # Check system installation
+                PKG_CHECK_MODULES([RAPIDCHECK], [rapidcheck], [rapidcheck_found=yes], [
+                        # Try manual detection
+                        AC_CHECK_HEADER([rapidcheck.h], [
+                                rapidcheck_found=yes
+                                RAPIDCHECK_CFLAGS=""
+                        ])
+                ])
+        fi
+        
+        if test "$rapidcheck_found" = yes; then
+                AC_DEFINE([HAVE_RAPIDCHECK], [1], [RapidCheck is available])
+                AC_SUBST(RAPIDCHECK_CFLAGS)
+                rapidcheck=yes
+        elif test "$rapidcheck" = yes; then
+                AC_MSG_ERROR([RapidCheck requested but not found. Run ext-deps/bootstrap_rapidcheck.sh or install system-wide.])
+        else
+                rapidcheck=no
+        fi
+fi
+AM_CONDITIONAL([HAVE_RAPIDCHECK], [test "$rapidcheck" = yes])
 ENSURE_FEATURE_PRESENT([$zfec_req], [$found_zfec], [Zfec not found])
 
 # -------------------------------------------------------------------------------------------------
