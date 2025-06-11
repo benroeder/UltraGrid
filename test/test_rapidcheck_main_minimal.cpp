@@ -1,6 +1,6 @@
 /**
- * @file test_rapidcheck_main.cpp
- * @brief Main entry point for all RapidCheck property-based tests
+ * @file test_rapidcheck_main_minimal.cpp
+ * @brief Minimal entry point for overlay RapidCheck tests
  */
 
 #ifdef HAVE_CONFIG_H
@@ -13,11 +13,11 @@
 // Declare test functions from other files
 extern void test_alpha_blend_properties();
 extern void test_overlay_properties();
-extern void test_soft_edge_properties();
-extern void test_file_monitoring_properties();
+extern void test_overlay_caching_properties();
+extern void test_r12l_edge_cases_properties();
 
 int main() {
-    std::cout << "Running UltraGrid RapidCheck property-based tests..." << std::endl;
+    std::cout << "Running UltraGrid RapidCheck property-based tests (extended)..." << std::endl;
     
     std::cout << "\n=== Alpha Blend Tests ===" << std::endl;
     test_alpha_blend_properties();
@@ -25,11 +25,11 @@ int main() {
     std::cout << "\n=== Overlay Tests ===" << std::endl;
     test_overlay_properties();
     
-    std::cout << "\n=== Soft Edge Tests ===" << std::endl;
-    test_soft_edge_properties();
+    std::cout << "\n=== Overlay Caching Tests ===" << std::endl;
+    test_overlay_caching_properties();
     
-    std::cout << "\n=== File Monitoring Tests ===" << std::endl;
-    test_file_monitoring_properties();
+    std::cout << "\n=== R12L Edge Case Tests ===" << std::endl;
+    test_r12l_edge_cases_properties();
     
     std::cout << "\nAll RapidCheck tests completed successfully!" << std::endl;
     return 0;

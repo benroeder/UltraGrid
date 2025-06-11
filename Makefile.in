@@ -515,10 +515,10 @@ tests: $(TEST_TARGET)
 check: tests
 
 # RapidCheck property-based tests
-@HAVE_RAPIDCHECK_TRUE@RAPIDCHECK_TEST_OBJS = test/test_overlay_rapidcheck.o test/test_alpha_blend_rapidcheck.o
+@HAVE_RAPIDCHECK_TRUE@RAPIDCHECK_TEST_OBJS = test/test_overlay_rapidcheck.o test/test_alpha_blend_rapidcheck.o test/test_soft_edges_rapidcheck.o test/test_file_monitoring_rapidcheck.o test/test_rapidcheck_main.o
 
-@HAVE_RAPIDCHECK_TRUE@bin/rapidcheck_tests: $(RAPIDCHECK_TEST_OBJS) $(COMMON_OBJS) src/utils/alpha_blend.o src/vo_postprocess/overlay.o
-@HAVE_RAPIDCHECK_TRUE@	$(CXX) $(CXXFLAGS) $(RAPIDCHECK_CFLAGS) -o $@ $^ $(LIBS)
+@HAVE_RAPIDCHECK_TRUE@bin/rapidcheck_tests: $(RAPIDCHECK_TEST_OBJS) src/utils/alpha_blend.o
+@HAVE_RAPIDCHECK_TRUE@	$(CXX) $(CXXFLAGS) $(RAPIDCHECK_CFLAGS) -o $@ $^ ./ext-deps/rapidcheck/build/librapidcheck.a -pthread
 
 @HAVE_RAPIDCHECK_TRUE@rapidcheck-tests: bin/rapidcheck_tests
 @HAVE_RAPIDCHECK_TRUE@	@echo "Running RapidCheck property-based tests..."
