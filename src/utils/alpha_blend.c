@@ -389,9 +389,90 @@ void alpha_blend_r12l(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 pixels_processed += 8;
         }
         
-        // Handle remaining pixels (less than 8)
-        // For now, we'll leave them unblended as this is complex
-        // In a production implementation, you'd handle the partial group
+        // Handle remaining pixels (less than 8) — process in pairs of 2
+        int remaining = width - pixels_processed;
+        if (remaining > 0) {
+                const uint8_t *src_ptr = src + (pixels_processed / 8) * 36;
+                uint8_t *dst_ptr = dst + (pixels_processed / 8) * 36;
+                int num_pairs = (remaining + 1) / 2;
+
+                // Unpack, blend, repack each pair (9 bytes = 2 pixels)
+                for (int pair = 0; pair < num_pairs; pair++) {
+                        int byte_offset = pair * 9;
+                        int px0 = pixels_processed + pair * 2;
+                        int px1 = px0 + 1;
+
+                        // Unpack first pixel: R0 and G0
+                        uint32_t sdata = ((uint32_t)src_ptr[byte_offset] << 0) |
+                                        ((uint32_t)src_ptr[byte_offset + 1] << 8) |
+                                        ((uint32_t)src_ptr[byte_offset + 2] << 16);
+                        uint16_t r0_src = (sdata >> 0) & 0xFFF;
+                        uint16_t g0_src = (sdata >> 12) & 0xFFF;
+
+                        uint32_t ddata = ((uint32_t)dst_ptr[byte_offset] << 0) |
+                                        ((uint32_t)dst_ptr[byte_offset + 1] << 8) |
+                                        ((uint32_t)dst_ptr[byte_offset + 2] << 16);
+                        uint16_t r0_dst = (ddata >> 0) & 0xFFF;
+                        uint16_t g0_dst = (ddata >> 12) & 0xFFF;
+
+                        // Unpack B0 and R1
+                        sdata = ((uint32_t)src_ptr[byte_offset + 3] << 0) |
+                               ((uint32_t)src_ptr[byte_offset + 4] << 8) |
+                               ((uint32_t)src_ptr[byte_offset + 5] << 16);
+                        uint16_t b0_src = (sdata >> 0) & 0xFFF;
+                        uint16_t r1_src = (sdata >> 12) & 0xFFF;
+
+                        ddata = ((uint32_t)dst_ptr[byte_offset + 3] << 0) |
+                               ((uint32_t)dst_ptr[byte_offset + 4] << 8) |
+                               ((uint32_t)dst_ptr[byte_offset + 5] << 16);
+                        uint16_t b0_dst = (ddata >> 0) & 0xFFF;
+                        uint16_t r1_dst = (ddata >> 12) & 0xFFF;
+
+                        // Blend first pixel
+                        uint16_t a0 = (alpha[px0] << 4) | (alpha[px0] >> 4);
+                        r0_dst = ((uint32_t)r0_src * a0 + (uint32_t)r0_dst * (4095 - a0)) / 4095;
+                        g0_dst = ((uint32_t)g0_src * a0 + (uint32_t)g0_dst * (4095 - a0)) / 4095;
+                        b0_dst = ((uint32_t)b0_src * a0 + (uint32_t)b0_dst * (4095 - a0)) / 4095;
+
+                        // Blend second pixel if it exists
+                        if (px1 < width) {
+                                sdata = ((uint32_t)src_ptr[byte_offset + 6] << 0) |
+                                       ((uint32_t)src_ptr[byte_offset + 7] << 8) |
+                                       ((uint32_t)src_ptr[byte_offset + 8] << 16);
+                                uint16_t g1_src = (sdata >> 0) & 0xFFF;
+                                uint16_t b1_src = (sdata >> 12) & 0xFFF;
+
+                                ddata = ((uint32_t)dst_ptr[byte_offset + 6] << 0) |
+                                       ((uint32_t)dst_ptr[byte_offset + 7] << 8) |
+                                       ((uint32_t)dst_ptr[byte_offset + 8] << 16);
+                                uint16_t g1_dst = (ddata >> 0) & 0xFFF;
+                                uint16_t b1_dst = (ddata >> 12) & 0xFFF;
+
+                                uint16_t a1 = (alpha[px1] << 4) | (alpha[px1] >> 4);
+                                r1_dst = ((uint32_t)r1_src * a1 + (uint32_t)r1_dst * (4095 - a1)) / 4095;
+                                uint16_t g1_out = ((uint32_t)g1_src * a1 + (uint32_t)g1_dst * (4095 - a1)) / 4095;
+                                uint16_t b1_out = ((uint32_t)b1_src * a1 + (uint32_t)b1_dst * (4095 - a1)) / 4095;
+
+                                // Pack G1 and B1
+                                uint32_t packed = (g1_out & 0xFFF) | ((b1_out & 0xFFF) << 12);
+                                dst_ptr[byte_offset + 6] = packed & 0xFF;
+                                dst_ptr[byte_offset + 7] = (packed >> 8) & 0xFF;
+                                dst_ptr[byte_offset + 8] = (packed >> 16) & 0xFF;
+                        }
+
+                        // Pack R0 and G0
+                        uint32_t packed = (r0_dst & 0xFFF) | ((g0_dst & 0xFFF) << 12);
+                        dst_ptr[byte_offset] = packed & 0xFF;
+                        dst_ptr[byte_offset + 1] = (packed >> 8) & 0xFF;
+                        dst_ptr[byte_offset + 2] = (packed >> 16) & 0xFF;
+
+                        // Pack B0 and R1
+                        packed = (b0_dst & 0xFFF) | ((r1_dst & 0xFFF) << 12);
+                        dst_ptr[byte_offset + 3] = packed & 0xFF;
+                        dst_ptr[byte_offset + 4] = (packed >> 8) & 0xFF;
+                        dst_ptr[byte_offset + 5] = (packed >> 16) & 0xFF;
+                }
+        }
 }
 
 /// I420 alpha blending (YUV 4:2:0 planar)

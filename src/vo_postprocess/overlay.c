@@ -733,11 +733,18 @@ static bool overlay_postprocess(void *state, struct video_frame *in, struct vide
                 return true;
         }
         
-        // Get color space converters
+        // Check if we have native blending for this format
+        bool has_native_blend = (out->color_spec == UYVY || out->color_spec == YUYV ||
+                                 out->color_spec == RGB || out->color_spec == v210 ||
+                                 out->color_spec == R10k || out->color_spec == R12L ||
+                                 out->color_spec == RGBA || out->color_spec == Y416 ||
+                                 out->color_spec == I420);
+
+        // Get color space converters (only required for fallback path)
         decoder_t decoder = get_decoder_from_to(out->color_spec, RGBA);
         decoder_t coder = get_decoder_from_to(RGBA, out->color_spec);
-        
-        if (!decoder || !coder) {
+
+        if (!has_native_blend && (!decoder || !coder)) {
                 log_msg(LOG_LEVEL_WARNING, MOD_NAME "Cannot find color space converters for %s\n",
                         get_codec_name(out->color_spec));
                 return true;
@@ -878,8 +885,8 @@ skip_scaling:
                 }
         }
         
-        // Ensure alignment for pixel formats
-        int pf_block = get_pf_block_bytes(out->color_spec);
+        // Ensure alignment for pixel formats (in pixels, not bytes)
+        int pf_block = get_pf_block_pixels(out->color_spec);
         if (pf_block > 0) {
                 pos_x = (pos_x / pf_block) * pf_block;
         }
@@ -922,14 +929,7 @@ skip_scaling:
                 blend_start = get_time_in_ns();
         }
         
-        // Check if we can do native format blending (before the loop)
-        bool used_native_blend = false;
-        if (out->color_spec == UYVY || out->color_spec == YUYV || out->color_spec == RGB || 
-            out->color_spec == v210 || out->color_spec == R10k || 
-            out->color_spec == R12L || out->color_spec == RGBA || out->color_spec == Y416 ||
-            out->color_spec == I420) {
-                used_native_blend = true;
-        }
+        bool used_native_blend = has_native_blend;
         
         // Handle I420 separately since it's planar
         if (out->color_spec == I420) {
