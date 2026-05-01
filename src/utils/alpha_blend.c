@@ -40,6 +40,8 @@
 #include "config.h"
 #endif
 
+#include <string.h>            // for memcpy
+
 #include "utils/alpha_blend.h"
 
 /// exact integer division by 255
@@ -153,16 +155,17 @@ void alpha_blend_rgb(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int
 /// v210 alpha blending (10-bit YUV 4:2:2, 6 pixels per 16 bytes)
 void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
-        uint32_t *dst32 = (uint32_t *)dst;
-        const uint32_t *src32 = (const uint32_t *)src;
-        
         // Process 6 pixels at a time (width must be divisible by 6)
         for (int x = 0; x < width; x += 6) {
-                // Unpack source values (10-bit)
-                uint32_t s0 = src32[0];
-                uint32_t s1 = src32[1];
-                uint32_t s2 = src32[2];
-                uint32_t s3 = src32[3];
+                // Calculate byte offset for this group of 6 pixels (16 bytes)
+                size_t offset = (x / 6) * 16;
+
+                // Unpack source values (10-bit) via memcpy to avoid alignment UB
+                uint32_t s0, s1, s2, s3;
+                memcpy(&s0, src + offset + 0, sizeof(uint32_t));
+                memcpy(&s1, src + offset + 4, sizeof(uint32_t));
+                memcpy(&s2, src + offset + 8, sizeof(uint32_t));
+                memcpy(&s3, src + offset + 12, sizeof(uint32_t));
                 
                 // Extract 10-bit components from source
                 // DWORD 0: Cb0 Y0 Cr0
@@ -186,10 +189,11 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 uint16_t y5_src = (s3 >> 20) & 0x3FF;
                 
                 // Unpack destination values
-                uint32_t d0 = dst32[0];
-                uint32_t d1 = dst32[1];
-                uint32_t d2 = dst32[2];
-                uint32_t d3 = dst32[3];
+                uint32_t d0, d1, d2, d3;
+                memcpy(&d0, dst + offset + 0, sizeof(uint32_t));
+                memcpy(&d1, dst + offset + 4, sizeof(uint32_t));
+                memcpy(&d2, dst + offset + 8, sizeof(uint32_t));
+                memcpy(&d3, dst + offset + 12, sizeof(uint32_t));
                 
                 uint16_t cb0_dst = (d0 >> 0) & 0x3FF;
                 uint16_t y0_dst = (d0 >> 10) & 0x3FF;
@@ -236,13 +240,16 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 cr2_dst = ((uint32_t)cr2_src * avg_a45 + (uint32_t)cr2_dst * (1023 - avg_a45)) / 1023;
                 
                 // Pack back
-                dst32[0] = (cb0_dst & 0x3FF) | ((y0_dst & 0x3FF) << 10) | ((cr0_dst & 0x3FF) << 20);
-                dst32[1] = (y1_dst & 0x3FF) | ((cb1_dst & 0x3FF) << 10) | ((y2_dst & 0x3FF) << 20);
-                dst32[2] = (cr1_dst & 0x3FF) | ((y3_dst & 0x3FF) << 10) | ((cb2_dst & 0x3FF) << 20);
-                dst32[3] = (y4_dst & 0x3FF) | ((cr2_dst & 0x3FF) << 10) | ((y5_dst & 0x3FF) << 20);
-                
-                src32 += 4;
-                dst32 += 4;
+                d0 = (cb0_dst & 0x3FF) | ((y0_dst & 0x3FF) << 10) | ((cr0_dst & 0x3FF) << 20);
+                d1 = (y1_dst & 0x3FF) | ((cb1_dst & 0x3FF) << 10) | ((y2_dst & 0x3FF) << 20);
+                d2 = (cr1_dst & 0x3FF) | ((y3_dst & 0x3FF) << 10) | ((cb2_dst & 0x3FF) << 20);
+                d3 = (y4_dst & 0x3FF) | ((cr2_dst & 0x3FF) << 10) | ((y5_dst & 0x3FF) << 20);
+
+                memcpy(dst + offset + 0, &d0, sizeof(uint32_t));
+                memcpy(dst + offset + 4, &d1, sizeof(uint32_t));
+                memcpy(dst + offset + 8, &d2, sizeof(uint32_t));
+                memcpy(dst + offset + 12, &d3, sizeof(uint32_t));
+
                 alpha += 6;
         }
 }
@@ -250,12 +257,13 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
 /// R10k alpha blending (10-bit RGB, 2:10:10:10 packed)
 void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
-        uint32_t *dst32 = (uint32_t *)dst;
-        const uint32_t *src32 = (const uint32_t *)src;
-        
         for (int x = 0; x < width; x++) {
-                uint32_t src_pixel = src32[x];
-                uint32_t dst_pixel = dst32[x];
+                // 4 bytes per pixel
+                size_t offset = x * 4;
+
+                uint32_t src_pixel, dst_pixel;
+                memcpy(&src_pixel, src + offset, sizeof(uint32_t));
+                memcpy(&dst_pixel, dst + offset, sizeof(uint32_t));
                 
                 // Extract 10-bit components
                 uint16_t r_src = (src_pixel >> 20) & 0x3FF;
@@ -275,8 +283,9 @@ void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
                 b_dst = ((uint32_t)b_src * a + (uint32_t)b_dst * (1023 - a)) / 1023;
                 
                 // Pack back with alpha set to max (0x3)
-                dst32[x] = (0x3 << 30) | ((r_dst & 0x3FF) << 20) | 
-                          ((g_dst & 0x3FF) << 10) | (b_dst & 0x3FF);
+                uint32_t result = (0x3 << 30) | ((r_dst & 0x3FF) << 20) |
+                                 ((g_dst & 0x3FF) << 10) | (b_dst & 0x3FF);
+                memcpy(dst + offset, &result, sizeof(uint32_t));
         }
 }
 
@@ -424,33 +433,34 @@ void alpha_blend_i420(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
 /// Y416 alpha blending (16-bit YUV with embedded alpha)
 void alpha_blend_y416(uint8_t *dst, const uint8_t *src, int width)
 {
-        uint16_t *dst16 = (uint16_t *)dst;
-        const uint16_t *src16 = (const uint16_t *)src;
-        
         for (int x = 0; x < width; x++) {
+                // 8 bytes per pixel: 4 components x 2 bytes
+                size_t offset = x * 8;
+
                 // Extract components (little-endian 16-bit)
-                uint16_t u_src = src16[0];
-                uint16_t y_src = src16[1];
-                uint16_t v_src = src16[2];
-                uint16_t a_src = src16[3];
-                
-                uint16_t u_dst = dst16[0];
-                uint16_t y_dst = dst16[1];
-                uint16_t v_dst = dst16[2];
-                
+                uint16_t u_src, y_src, v_src, a_src;
+                memcpy(&u_src, src + offset + 0, sizeof(uint16_t));
+                memcpy(&y_src, src + offset + 2, sizeof(uint16_t));
+                memcpy(&v_src, src + offset + 4, sizeof(uint16_t));
+                memcpy(&a_src, src + offset + 6, sizeof(uint16_t));
+
+                uint16_t u_dst, y_dst, v_dst;
+                memcpy(&u_dst, dst + offset + 0, sizeof(uint16_t));
+                memcpy(&y_dst, dst + offset + 2, sizeof(uint16_t));
+                memcpy(&v_dst, dst + offset + 4, sizeof(uint16_t));
+
                 // Blend with 16-bit precision
                 uint32_t inv_alpha = 65535 - a_src;
-                
-                // Blend components
-                dst16[0] = (uint16_t)(((uint32_t)u_src * a_src + (uint32_t)u_dst * inv_alpha) / 65535);
-                dst16[1] = (uint16_t)(((uint32_t)y_src * a_src + (uint32_t)y_dst * inv_alpha) / 65535);
-                dst16[2] = (uint16_t)(((uint32_t)v_src * a_src + (uint32_t)v_dst * inv_alpha) / 65535);
-                
-                // Keep destination alpha at full opacity
-                dst16[3] = 65535;
-                
-                dst16 += 4;
-                src16 += 4;
+
+                uint16_t u_out = (uint16_t)(((uint32_t)u_src * a_src + (uint32_t)u_dst * inv_alpha) / 65535);
+                uint16_t y_out = (uint16_t)(((uint32_t)y_src * a_src + (uint32_t)y_dst * inv_alpha) / 65535);
+                uint16_t v_out = (uint16_t)(((uint32_t)v_src * a_src + (uint32_t)v_dst * inv_alpha) / 65535);
+                uint16_t a_out = 65535; // Keep destination alpha at full opacity
+
+                memcpy(dst + offset + 0, &u_out, sizeof(uint16_t));
+                memcpy(dst + offset + 2, &y_out, sizeof(uint16_t));
+                memcpy(dst + offset + 4, &v_out, sizeof(uint16_t));
+                memcpy(dst + offset + 6, &a_out, sizeof(uint16_t));
         }
 }
 
