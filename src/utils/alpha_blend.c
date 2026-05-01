@@ -65,7 +65,7 @@ void alpha_blend_rgba(uint8_t *dst, const uint8_t *src, int width)
                 dst[0] = EXACT_DIV255(r * a + dst[0] * (255 - a));
                 dst[1] = EXACT_DIV255(g * a + dst[1] * (255 - a));
                 dst[2] = EXACT_DIV255(b * a + dst[2] * (255 - a));
-                dst[3] = 255;  // Keep output fully opaque
+                dst[3] = a + EXACT_DIV255(dst[3] * (255 - a));  // Porter-Duff 'over'
                 
                 src += 4;
                 dst += 4;
