@@ -35,17 +35,17 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <assert.h>
-#include <errno.h>
-#include <math.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
+#include <assert.h>           // for assert
+#include <errno.h>            // for errno, ENOENT
+#include <math.h>             // for expf, powf, cosf, M_PI
+#include <stdbool.h>          // for bool, true, false
+#include <stdint.h>           // for uint8_t, uint16_t
+#include <stdio.h>            // for NULL
+#include <stdlib.h>           // for calloc, free, malloc, atoi
+#include <string.h>           // for strcmp, strdup, memcpy, memset, strlen
+#include <sys/stat.h>         // for stat, S_ISREG
+#include <time.h>             // for time, time_t
+#include <unistd.h>           // for access, R_OK
 
 #ifdef _WIN32
 #include <windows.h>

@@ -42,16 +42,10 @@
 
 #include "utils/alpha_blend.h"
 
-/**
- * Use exact division by 255 for accurate alpha blending
- * This prevents aliasing artifacts at edges
- */
+/// exact integer division by 255
 #define EXACT_DIV255(x) ((x) / 255)
 
-/**
- * Native RGBA alpha blending
- * RGBA format: R8 G8 B8 A8
- */
+/// RGBA alpha blending with embedded alpha
 void alpha_blend_rgba(uint8_t *dst, const uint8_t *src, int width)
 {
         for (int x = 0; x < width; x++) {
@@ -60,8 +54,6 @@ void alpha_blend_rgba(uint8_t *dst, const uint8_t *src, int width)
                 uint8_t b = src[2];
                 uint8_t a = src[3];
                 
-                // Alpha blend: out = overlay * alpha + video * (1 - alpha)
-                // Use exact division for accurate alpha blending
                 dst[0] = EXACT_DIV255(r * a + dst[0] * (255 - a));
                 dst[1] = EXACT_DIV255(g * a + dst[1] * (255 - a));
                 dst[2] = EXACT_DIV255(b * a + dst[2] * (255 - a));
@@ -72,89 +64,77 @@ void alpha_blend_rgba(uint8_t *dst, const uint8_t *src, int width)
         }
 }
 
-/**
- * Native UYVY alpha blending
- * UYVY format: U0 Y0 V0 Y1 (2 pixels in 4 bytes)
- * Alpha is provided as grayscale/luminance for each pixel
- */
+/// UYVY alpha blending with separate alpha channel
 void alpha_blend_uyvy(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         for (int x = 0; x < width; x += 2) {
                 // Get alpha values for both pixels
                 uint8_t a0 = alpha[0];
                 uint8_t a1 = alpha[1];
-                
+
                 // Components from source
                 uint8_t u_src = src[0];
                 uint8_t y0_src = src[1];
                 uint8_t v_src = src[2];
                 uint8_t y1_src = src[3];
-                
+
                 // Components from destination
                 uint8_t u_dst = dst[0];
                 uint8_t y0_dst = dst[1];
                 uint8_t v_dst = dst[2];
                 uint8_t y1_dst = dst[3];
-                
+
                 // Blend Y components with their respective alphas
                 dst[1] = EXACT_DIV255(y0_src * a0 + y0_dst * (255 - a0));
                 dst[3] = EXACT_DIV255(y1_src * a1 + y1_dst * (255 - a1));
-                
+
                 // For U and V, use average of both alphas
-                uint16_t avg_alpha = (a0 + a1 + 1) >> 1;  // Round up
+                uint16_t avg_alpha = (a0 + a1 + 1) >> 1;
                 dst[0] = EXACT_DIV255(u_src * avg_alpha + u_dst * (255 - avg_alpha));
                 dst[2] = EXACT_DIV255(v_src * avg_alpha + v_dst * (255 - avg_alpha));
-                
+
                 src += 4;
                 dst += 4;
                 alpha += 2;
         }
 }
 
-/**
- * Native YUYV alpha blending
- * YUYV format: Y0 U0 Y1 V0 (2 pixels in 4 bytes)
- * Alpha is provided as grayscale/luminance for each pixel
- */
+/// YUYV alpha blending with separate alpha channel
 void alpha_blend_yuyv(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         for (int x = 0; x < width; x += 2) {
                 // Get alpha values for both pixels
                 uint8_t a0 = alpha[0];
                 uint8_t a1 = alpha[1];
-                
+
                 // Components from source
                 uint8_t y0_src = src[0];
                 uint8_t u_src = src[1];
                 uint8_t y1_src = src[2];
                 uint8_t v_src = src[3];
-                
+
                 // Components from destination
                 uint8_t y0_dst = dst[0];
                 uint8_t u_dst = dst[1];
                 uint8_t y1_dst = dst[2];
                 uint8_t v_dst = dst[3];
-                
+
                 // Blend Y components with their respective alphas
                 dst[0] = EXACT_DIV255(y0_src * a0 + y0_dst * (255 - a0));
                 dst[2] = EXACT_DIV255(y1_src * a1 + y1_dst * (255 - a1));
-                
+
                 // For U and V, use average of both alphas
-                uint16_t avg_alpha = (a0 + a1 + 1) >> 1;  // Round up
+                uint16_t avg_alpha = (a0 + a1 + 1) >> 1;
                 dst[1] = EXACT_DIV255(u_src * avg_alpha + u_dst * (255 - avg_alpha));
                 dst[3] = EXACT_DIV255(v_src * avg_alpha + v_dst * (255 - avg_alpha));
-                
+
                 src += 4;
                 dst += 4;
                 alpha += 2;
         }
 }
 
-/**
- * Native RGB alpha blending
- * RGB format: R8 G8 B8 (3 bytes per pixel)
- * Alpha is provided as grayscale/luminance for each pixel
- */
+/// RGB alpha blending with separate alpha channel
 void alpha_blend_rgb(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         for (int x = 0; x < width; x++) {
@@ -170,11 +150,7 @@ void alpha_blend_rgb(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int
         }
 }
 
-/**
- * Native v210 alpha blending (10-bit YUV 4:2:2 packed)
- * v210 packs 6 pixels (12 values: 6Y + 3U + 3V) into 16 bytes (4 DWORDs)
- * Format: 2 bits padding, 10 bits value, repeated
- */
+/// v210 alpha blending (10-bit YUV 4:2:2, 6 pixels per 16 bytes)
 void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         uint32_t *dst32 = (uint32_t *)dst;
@@ -271,10 +247,7 @@ void alpha_blend_v210(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
         }
 }
 
-/**
- * Native R10k alpha blending (10-bit RGB packed)
- * R10k format: 2:10:10:10 RGBA packed into 32 bits
- */
+/// R10k alpha blending (10-bit RGB, 2:10:10:10 packed)
 void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         uint32_t *dst32 = (uint32_t *)dst;
@@ -307,13 +280,7 @@ void alpha_blend_r10k(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
         }
 }
 
-/**
- * Native R12L alpha blending (12-bit RGB packed, little-endian)
- * R12L format: 36 bytes contain 8 pixels (8 pixels * 36 bits per pixel / 8 bits per byte)
- * Each pixel: 12 bits R + 12 bits G + 12 bits B = 36 bits
- * Layout: [R0 G0][B0 R1][G1 B1][R2 G2][B2 R3][G3 B3][R4 G4][B4 R5][G5 B5][R6 G6][B6 R7][G7 B7]
- * Where each pair of brackets represents 3 bytes (24 bits), containing parts of 2 pixels
- */
+/// R12L alpha blending (12-bit RGB LE, 8 pixels per 36 bytes)
 void alpha_blend_r12l(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, int width)
 {
         // Process pixels in groups of 8 (which pack into 36 bytes)
@@ -418,10 +385,7 @@ void alpha_blend_r12l(uint8_t *dst, const uint8_t *src, const uint8_t *alpha, in
         // In a production implementation, you'd handle the partial group
 }
 
-/**
- * Native I420 alpha blending (YUV 4:2:0 planar)
- * I420 format: Y plane (width x height), U plane (width/2 x height/2), V plane (width/2 x height/2)
- */
+/// I420 alpha blending (YUV 4:2:0 planar)
 void alpha_blend_i420(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
                      const uint8_t *src_y, const uint8_t *src_u, const uint8_t *src_v,
                      const uint8_t *alpha, int width, int height)
@@ -457,10 +421,7 @@ void alpha_blend_i420(uint8_t *dst_y, uint8_t *dst_u, uint8_t *dst_v,
         }
 }
 
-/**
- * Native Y416 alpha blending (16-bit YUV with alpha)
- * Y416 format: U16 Y16 V16 A16 (little-endian)
- */
+/// Y416 alpha blending (16-bit YUV with embedded alpha)
 void alpha_blend_y416(uint8_t *dst, const uint8_t *src, int width)
 {
         uint16_t *dst16 = (uint16_t *)dst;
@@ -493,9 +454,6 @@ void alpha_blend_y416(uint8_t *dst, const uint8_t *src, int width)
         }
 }
 
-/**
- * Get implementation name
- */
 const char *alpha_blend_get_implementation(void)
 {
         return "Scalar with exact division";
