@@ -1,6 +1,7 @@
 /**
- * @file test_soft_edges_rapidcheck.cpp
- * @brief Property-based tests for overlay soft edge functionality using RapidCheck
+ * @file   test_soft_edges_rapidcheck.cpp
+ * @author Ben Roeder     <ben@sohonet.com>
+ * @brief  Property-based tests for overlay soft edge functionality using RapidCheck
  */
 
 #ifdef HAVE_CONFIG_H

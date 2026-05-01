@@ -1,6 +1,7 @@
 /**
- * @file test_overlay_rapidcheck.cpp
- * @brief Property-based tests for overlay module using RapidCheck
+ * @file   test_overlay_rapidcheck.cpp
+ * @author Ben Roeder     <ben@sohonet.com>
+ * @brief  Property-based tests for overlay module using RapidCheck
  */
 
 #ifdef HAVE_CONFIG_H

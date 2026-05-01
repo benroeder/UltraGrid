@@ -1,6 +1,6 @@
 /**
  * @file   vo_postprocess/overlay.c
- * @author UltraGrid Team
+ * @author Ben Roeder     <ben@sohonet.com>
  */
 /*
  * Copyright (c) 2025 CESNET

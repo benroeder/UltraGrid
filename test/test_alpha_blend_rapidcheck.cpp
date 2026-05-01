@@ -1,6 +1,7 @@
 /**
- * @file test_alpha_blend_rapidcheck.cpp
- * @brief Property-based tests for alpha blending using RapidCheck
+ * @file   test_alpha_blend_rapidcheck.cpp
+ * @author Ben Roeder     <ben@sohonet.com>
+ * @brief  Property-based tests for alpha blending using RapidCheck
  */
 
 #ifdef HAVE_CONFIG_H

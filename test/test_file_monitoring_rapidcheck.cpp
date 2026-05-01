@@ -1,6 +1,7 @@
 /**
- * @file test_file_monitoring_rapidcheck.cpp
- * @brief Property-based tests for cross-platform file monitoring with nanosecond precision
+ * @file   test_file_monitoring_rapidcheck.cpp
+ * @author Ben Roeder     <ben@sohonet.com>
+ * @brief  Property-based tests for cross-platform file monitoring with nanosecond precision
  */
 
 #ifdef HAVE_CONFIG_H

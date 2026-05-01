@@ -1,6 +1,7 @@
 /**
- * @file test_rapidcheck_main.cpp
- * @brief Main entry point for all RapidCheck property-based tests
+ * @file   test_rapidcheck_main.cpp
+ * @author Ben Roeder     <ben@sohonet.com>
+ * @brief  Main entry point for all RapidCheck property-based tests
  */
 
 #ifdef HAVE_CONFIG_H

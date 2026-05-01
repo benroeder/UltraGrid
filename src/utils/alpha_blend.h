@@ -1,6 +1,6 @@
 /**
  * @file   utils/alpha_blend.h
- * @author UltraGrid Team
+ * @author Ben Roeder     <ben@sohonet.com>
  * @brief  Alpha blending utilities for various pixel formats
  */
 /*
